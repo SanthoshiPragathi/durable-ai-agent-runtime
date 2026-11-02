@@ -5,8 +5,10 @@ implements on top of PostgreSQL (engine/execution_context.py), and consults a Re
 the engine loads when a run is resumed. That keeps this module unit-testable without a database.
 """
 
+import hashlib
 import inspect
 import random as _random
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -14,11 +16,13 @@ from typing import Any, Protocol
 
 from app.engine.errors import (
     DuplicateStepNameError,
+    LLMConfigurationError,
     NonDeterminismError,
     StepFailedError,
 )
 from app.engine.hashing import hash_step_input, normalize_json
 from app.engine.replay import RecordedStep, ReplayHistory, StepStatus
+from app.integrations.llm.base import LLMProvider
 
 
 class StepRecorder(Protocol):
@@ -44,12 +48,14 @@ class WorkflowContext:
         *,
         clock: Callable[[], datetime] | None = None,
         rng: Callable[[], float] | None = None,
+        llm: LLMProvider | None = None,
     ) -> None:
         self.run_id = run_id
         self._recorder = recorder
         self._replay = replay or ReplayHistory()
         self._clock = clock or (lambda: datetime.now(UTC))
         self._rng = rng or _random.random
+        self._llm = llm
         self._auto_counters: dict[str, int] = {}
         self._used_step_names: set[str] = set()
         self._step_index = 0
@@ -89,6 +95,38 @@ class WorkflowContext:
     async def random(self) -> float:
         """A random float in [0, 1), recorded. A replay returns the originally drawn value."""
         return await self._execute(self._auto_name("random"), hash_step_input((), {}), self._rng)
+
+    async def llm(self, name: str, prompt: str, *, model: str | None = None, **params: Any) -> str:
+        """Ask the LLM and return its text answer. The call is recorded as a step named `name`.
+
+        Recorded: output, model, a hash of the prompt (not the prompt itself), input/output tokens,
+        estimated cost (None if unknown), latency in ms and a timestamp. A replay returns the
+        recorded output and never calls the model again, so a different answer on a re-run cannot
+        change the workflow's path. `params` (e.g. temperature) must be JSON-serializable.
+        """
+        provider = self._llm
+        if provider is None:
+            raise LLMConfigurationError("this run has no LLM provider configured")
+        chosen_model = model or provider.default_model
+        input_hash = hash_step_input((), {"prompt": prompt, "model": chosen_model, "params": params})
+
+        async def call() -> dict[str, Any]:
+            started = time.perf_counter()
+            response = await provider.complete(prompt, model=chosen_model, **params)
+            latency_ms = (time.perf_counter() - started) * 1000
+            return {
+                "output": response.output,
+                "model": response.model,
+                "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "cost_usd": response.cost_usd,
+                "latency_ms": round(latency_ms, 3),
+                "timestamp": self._clock().astimezone(UTC).isoformat(),
+            }
+
+        record = await self._execute(name, input_hash, call)
+        return record["output"]
 
     def _auto_name(self, kind: str) -> str:
         # Deterministic names, so replay matches the n-th now()/random() call with its recording.

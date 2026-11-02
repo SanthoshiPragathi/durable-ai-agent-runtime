@@ -63,6 +63,10 @@ class WorkflowVersionMismatchError(DurableRuntimeError):
     """The registered workflow version differs from the version the run was started with."""
 
 
+class LLMConfigurationError(DurableRuntimeError):
+    """No usable LLM provider is configured."""
+
+
 class CorruptHistoryError(DurableRuntimeError):
     """The recorded event history is internally inconsistent."""
 

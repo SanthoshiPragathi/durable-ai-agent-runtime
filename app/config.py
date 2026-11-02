@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     llm_provider: str = "mock"  # "mock" or "openai"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    # Optional. Without both prices the recorded cost is None (unknown), not a guess.
+    openai_input_price_per_1m: float | None = None
+    openai_output_price_per_1m: float | None = None
 
     log_level: str = "INFO"
 
