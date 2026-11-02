@@ -55,6 +55,25 @@ class StepFailedError(DurableRuntimeError):
         self.message = message
 
 
+class AmbiguousOutcomeError(Exception):
+    """Raised BY A TOOL when it cannot tell whether its action happened (timeout, dropped
+    connection after the request was sent). Deliberately not a DurableRuntimeError: it is the
+    tool's report, which the runtime turns into a retry, a reconciliation or OUTCOME_UNKNOWN."""
+
+
+class OutcomeUnknownError(DurableRuntimeError):
+    """A step with an external effect has an unknown outcome and cannot be retried safely.
+
+    The step is recorded as STEP_OUTCOME_UNKNOWN and the run moves to NEEDS_REVIEW until a person
+    (or a reconciliation job) resolves it.
+    """
+
+    def __init__(self, step_name: str, reason: str) -> None:
+        super().__init__(f"outcome of step {step_name!r} is unknown: {reason}")
+        self.step_name = step_name
+        self.reason = reason
+
+
 class NonDeterminismError(DurableRuntimeError):
     """Replay found that the workflow code no longer matches the recorded history."""
 

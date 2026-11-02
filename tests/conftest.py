@@ -21,6 +21,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import to_sync_url
 from app.database.session import SessionFactory, create_session_factory
+from app.integrations.tools.fake_ledger import ServicesBase
 from app.sdk.workflow import registry
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -98,3 +99,49 @@ def isolated_registry() -> Iterator[None]:
     registry.clear()
     yield
     registry.restore(saved)
+
+
+DEFAULT_SERVICES_TEST_URL = "postgresql+asyncpg://durable:durable@localhost:5432/durable_services_test"
+
+
+@pytest.fixture(scope="session")
+def services_database_url(migrated_database: str) -> str:
+    """The fake services' own database (separate from the runtime's), schema rebuilt per session."""
+    url = os.environ.get("TEST_SERVICES_DATABASE_URL", DEFAULT_SERVICES_TEST_URL)
+    sync_url = make_url(to_sync_url(url))
+    assert sync_url.database and sync_url.database.endswith("_test")
+
+    admin = create_engine(sync_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": sync_url.database}
+        ).scalar()
+        if not exists:
+            conn.execute(text(f'CREATE DATABASE "{sync_url.database}"'))
+    admin.dispose()
+
+    engine = create_engine(sync_url, isolation_level="AUTOCOMMIT")
+    with engine.connect() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    ServicesBase.metadata.create_all(engine)
+    engine.dispose()
+    return url
+
+
+@pytest.fixture
+def clean_services_db(services_database_url: str) -> Iterator[None]:
+    engine = create_engine(to_sync_url(services_database_url), isolation_level="AUTOCOMMIT")
+    with engine.connect() as conn:
+        conn.execute(text("TRUNCATE payment_refunds, emails RESTART IDENTITY"))
+    engine.dispose()
+    yield
+
+
+@pytest_asyncio.fixture
+async def services_session_factory(
+    clean_services_db: None, services_database_url: str
+) -> AsyncIterator[SessionFactory]:
+    engine = create_async_engine(services_database_url, poolclass=NullPool)
+    yield create_session_factory(engine)
+    await engine.dispose()

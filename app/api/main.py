@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 import app.examples.simple_workflow  # noqa: F401  (importing registers the example workflow)
-from app.api.routes import runs, workflows
+from app.api.routes import runs, services, workflows
 from app.engine.errors import (
     DurableRuntimeError,
     InvalidRunStateError,
@@ -25,6 +25,7 @@ app = FastAPI(
 )
 app.include_router(workflows.router)
 app.include_router(runs.router)
+app.include_router(services.router)
 
 _STATUS_BY_ERROR: dict[type[DurableRuntimeError], int] = {
     WorkflowNotFoundError: status.HTTP_404_NOT_FOUND,

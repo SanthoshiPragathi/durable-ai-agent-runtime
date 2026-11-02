@@ -48,3 +48,19 @@ class WorkflowOut(BaseModel):
 
 class ErrorOut(BaseModel):
     detail: str
+
+
+class RefundOut(BaseModel):
+    refund_id: str
+    order_id: str
+    amount: int
+    status: str
+    idempotency_key: str | None = None
+    reference: str | None = None
+
+
+class EmailOut(BaseModel):
+    email_id: str
+    to: str
+    subject: str
+    idempotency_key: str | None = None
