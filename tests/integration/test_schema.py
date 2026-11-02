@@ -1,6 +1,11 @@
 """Schema-level guarantees, checked against a real PostgreSQL."""
 
+import os
+import shutil
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 
 import pytest
 from alembic import command
@@ -10,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import to_sync_url
 from app.database.session import SessionFactory
-from tests.conftest import alembic_config
+from tests.conftest import ROOT, alembic_config
 
 pytestmark = pytest.mark.integration
 
@@ -107,3 +112,20 @@ async def test_run_must_reference_registered_workflow(session_factory: SessionFa
 def test_migrations_match_models(migrated_database: str) -> None:
     """Fails if the SQLAlchemy models drifted from the Alembic migrations."""
     command.check(alembic_config(to_sync_url(migrated_database)))
+
+
+def test_alembic_cli_runs_from_the_project_root(migrated_database: str) -> None:
+    """Regression: the real `alembic` executable must be able to import `app` (prepend_sys_path)."""
+    alembic_bin = shutil.which("alembic", path=str(Path(sys.executable).parent))
+    if alembic_bin is None:
+        pytest.skip("alembic executable not found next to the Python interpreter")
+    result = subprocess.run(
+        [alembic_bin, "current"],
+        cwd=ROOT,
+        env={**os.environ, "DATABASE_URL": migrated_database},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "0001" in result.stdout + result.stderr
