@@ -44,3 +44,17 @@ async def process_refund_pipeline(ctx, order_id: str):
     refund = await ctx.step("process_refund", process_refund, order["amount"])
     await ctx.step("send_email", send_email, refund["refund_id"])
     return {"order_id": order_id, "refund_id": refund["refund_id"], "eligible": eligible}
+
+
+@workflow(name="legacy_refund_pipeline")
+async def legacy_refund_pipeline(ctx, order_id: str):
+    """A refund through a provider that cannot dedupe and has no verify hook."""
+    from app.integrations.tools import NonIdempotentPaymentService
+    from app.integrations.tools.fake_ledger import get_services_session_factory
+
+    payments = NonIdempotentPaymentService(get_services_session_factory())
+    reference = ctx.idempotency_key("process_refund")
+    refund = await ctx.effect(
+        "process_refund", payments.refund, order_id, 2500, reference, idempotent=False
+    )
+    return {"refund_id": refund["refund_id"]}
