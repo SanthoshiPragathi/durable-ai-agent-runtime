@@ -1,0 +1,32 @@
+# Phase 0: PostgreSQL + API. Worker services are added in Phase 4.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: durable
+      POSTGRES_PASSWORD: durable   # local development only
+      POSTGRES_DB: durable
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U durable -d durable"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://durable:durable@postgres:5432/durable
+      SERVICES_DATABASE_URL: postgresql+psycopg://durable:durable@postgres:5432/fake_services
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
