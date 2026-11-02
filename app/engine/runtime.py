@@ -4,20 +4,24 @@ Limitations (all addressed in later phases, none hidden):
   * Execution happens in whatever process calls execute_run()/resume_run(); there are no worker
     processes or leases yet (Phase 4). resume_run() must only be called when the previous
     executor is known to be dead: two live executors of one run would both execute steps.
-  * A step that was STARTED but has no recorded outcome (the worker died mid-step) is run again.
-    That is at-least-once, so a step with an external side effect can happen twice. Phase 3 adds
-    idempotency keys and OUTCOME_UNKNOWN to close that gap.
+  * A plain ctx.step that was STARTED but has no recorded outcome (the worker died mid-step) is
+    run again, so only repeat-safe work belongs in ctx.step. A ctx.effect step is reconciled
+    instead: retried with its idempotency key, checked with its verify hook, or parked as
+    OUTCOME_UNKNOWN (run status NEEDS_REVIEW) when nothing can tell whether it happened.
 """
 
 import logging
 import uuid
 from typing import Any
 
-from app.database.models import EventType, RunStatus, WorkflowRun
-from app.database.repositories import EventRepository, RunRepository
+from app.database.models import EventType, IdempotencyStatus, RunStatus, WorkflowRun
+from app.database.repositories import EventRepository, IdempotencyRepository, RunRepository
 from app.database.session import SessionFactory
 from app.engine.errors import (
+    InvalidResolutionError,
     InvalidRunStateError,
+    NonDeterminismError,
+    OutcomeUnknownError,
     RunNotFoundError,
     WorkflowVersionMismatchError,
     format_error,
@@ -121,6 +125,69 @@ async def resume_run(
     return await _drive(session_factory, run_id, definition, input_data, history, llm_provider)
 
 
+RESOLUTIONS = ("completed", "failed", "not_executed")
+
+
+async def resolve_unknown_step(
+    session_factory: SessionFactory,
+    run_id: uuid.UUID,
+    step_name: str,
+    *,
+    outcome: str,
+    result: Any = None,
+    message: str | None = None,
+    resolved_by: str = "operator",
+) -> WorkflowRun:
+    """Record a reviewer's answer for a step whose outcome was unknown, and reopen the run.
+
+    outcome="completed"     the effect DID happen; `result` is what the step should have returned
+    outcome="failed"        the effect did not happen and should not be retried; the step fails
+    outcome="not_executed"  the effect did NOT happen; it is safe to run the step now
+
+    The run moves NEEDS_REVIEW -> RUNNING; call resume_run to continue it. The decision is recorded
+    as a STEP_RESOLVED event (with who made it) so the history stays complete and replayable.
+    """
+    if outcome not in RESOLUTIONS:
+        raise InvalidResolutionError(f"outcome must be one of {RESOLUTIONS}, not {outcome!r}")
+    normalized = normalize_json(result) if outcome == "completed" else None
+
+    async with session_factory() as session, session.begin():
+        runs = RunRepository(session)
+        run = await runs.get_run(run_id)
+        if run is None:
+            raise RunNotFoundError(f"run {run_id} does not exist")
+        if run.status != RunStatus.NEEDS_REVIEW.value:
+            raise InvalidRunStateError(f"run {run_id} is {run.status}, not NEEDS_REVIEW")
+
+        history = ReplayHistory.from_events(await EventRepository(session).list_events(run_id))
+        step = next((s for s in history.steps if s.name == step_name), None)
+        if step is None or step.status != StepStatus.UNKNOWN:
+            raise InvalidResolutionError(f"step {step_name!r} is not awaiting resolution")
+
+        await EventRepository(session).append(
+            run_id,
+            EventType.STEP_RESOLVED,
+            step_name=step_name,
+            result_data={
+                "outcome": outcome,
+                "result": normalized,
+                "message": message,
+                "resolved_by": resolved_by,
+            },
+        )
+        ops = IdempotencyRepository(session)
+        key = f"{run_id}:{step_name}"
+        if await ops.get(key) is not None:
+            if outcome == "completed":
+                await ops.set_status(key, IdempotencyStatus.RECONCILED, normalized)
+            elif outcome == "failed":
+                await ops.set_status(key, IdempotencyStatus.FAILED)
+        await runs.reopen(run_id)
+        reopened = await runs.get_run(run_id)
+        assert reopened is not None
+    return reopened
+
+
 async def _drive(
     session_factory: SessionFactory,
     run_id: uuid.UUID,
@@ -139,13 +206,19 @@ async def _drive(
         result = normalize_json(await definition.fn(ctx, **input_data))
         ctx.verify_replay_complete()
     except Exception as exc:
-        if ctx.divergence is not None:
+        halt = ctx.halt
+        if isinstance(halt, NonDeterminismError):
             # The code no longer matches the history. This is not the workflow failing, so the run
             # stays RUNNING for someone to fix the code and resume; it is never silently "failed".
-            logger.error("replay diverged", extra={"run_id": str(run_id), "error": str(ctx.divergence)})
-            raise ctx.divergence from None
-        logger.info("workflow run failed", extra={"run_id": str(run_id), "error": repr(exc)})
-        await _record_failure(session_factory, run_id, exc)
+            logger.error("replay diverged", extra={"run_id": str(run_id), "error": str(halt)})
+            raise halt from None
+        if isinstance(halt, OutcomeUnknownError):
+            # The recorder already moved the run to NEEDS_REVIEW. Nothing more executes until a
+            # person resolves the step; this is not a failed workflow either.
+            logger.warning("run needs review", extra={"run_id": str(run_id), "error": str(halt)})
+        else:
+            logger.info("workflow run failed", extra={"run_id": str(run_id), "error": repr(exc)})
+            await _record_failure(session_factory, run_id, exc)
     else:
         failpoint("before_workflow_completed")
         await _record_success(session_factory, run_id, result)

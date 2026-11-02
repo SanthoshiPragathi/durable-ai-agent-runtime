@@ -153,3 +153,70 @@ async def test_list_runs_filters_by_status_and_workflow(session_factory: Session
         assert [r.run_id for r in running] == [first]
         assert await repo.list_runs(workflow_name="other") == []
         assert len(await repo.list_runs(limit=1)) == 1
+
+
+# ---- Phase 3: idempotency records and the NEEDS_REVIEW state ------------------------------------
+
+
+async def test_needs_review_transitions_are_guarded(session_factory: SessionFactory) -> None:
+    run_id = await _new_run(session_factory)
+    with pytest.raises(InvalidRunStateError):  # PENDING cannot go to NEEDS_REVIEW
+        async with session_factory() as session, session.begin():
+            await RunRepository(session).mark_needs_review(run_id)
+
+    async with session_factory() as session, session.begin():
+        repo = RunRepository(session)
+        await repo.mark_running(run_id)
+        await repo.mark_needs_review(run_id)
+    with pytest.raises(InvalidRunStateError):  # not RUNNING anymore, cannot finish
+        async with session_factory() as session, session.begin():
+            await RunRepository(session).mark_completed(run_id, 1)
+
+    async with session_factory() as session, session.begin():
+        await RunRepository(session).reopen(run_id)
+    async with session_factory() as session:
+        assert (await RunRepository(session).get_run(run_id)).status == "RUNNING"
+
+
+async def test_idempotency_record_lifecycle(session_factory: SessionFactory) -> None:
+    from app.database.models import IdempotencyStatus
+    from app.database.repositories import IdempotencyRepository
+
+    run_id = await _new_run(session_factory)
+    key = f"{run_id}:process_refund"
+
+    async with session_factory() as session, session.begin():
+        await IdempotencyRepository(session).mark_in_flight(key, run_id, "process_refund")
+    async with session_factory() as session:
+        record = await IdempotencyRepository(session).get(key)
+    assert (record.status, record.attempts, record.step_name) == ("IN_FLIGHT", 1, "process_refund")
+
+    async with session_factory() as session, session.begin():  # a second start counts an attempt
+        await IdempotencyRepository(session).mark_in_flight(key, run_id, "process_refund")
+        await IdempotencyRepository(session).add_attempt(key)
+    async with session_factory() as session, session.begin():
+        await IdempotencyRepository(session).set_status(
+            key, IdempotencyStatus.SUCCEEDED, {"refund_id": "rf_1"}
+        )
+    async with session_factory() as session:
+        repo = IdempotencyRepository(session)
+        record = await repo.get(key)
+        listed = await repo.list_for_run(run_id)
+    assert (record.status, record.attempts, record.result_data) == ("SUCCEEDED", 3, {"refund_id": "rf_1"})
+    assert [r.idempotency_key for r in listed] == [key]
+
+
+async def test_idempotency_status_must_be_known(session_factory: SessionFactory) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    run_id = await _new_run(session_factory)
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "INSERT INTO idempotency_records (idempotency_key, run_id, step_name, status, attempts) "
+                    "VALUES ('k', :r, 's', 'BOGUS', 1)"
+                ),
+                {"r": run_id},
+            )

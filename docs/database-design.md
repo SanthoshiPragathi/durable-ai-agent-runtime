@@ -16,9 +16,14 @@ erDiagram
 | `workflows` | Registered definitions. Primary key `(name, version)`, so a run always points at the exact version of the code it used. |
 | `workflow_runs` | One row per execution: status, JSON input, JSON result, current step, error message, timestamps, `parent_run_id`. |
 | `workflow_events` | The append-only history. One row per thing that happened. |
+| `idempotency_records` | One row per external operation, keyed by idempotency key: status (`IN_FLIGHT`, `SUCCEEDED`, `RECONCILED`, `FAILED`, `UNKNOWN`), attempts and result. Updated in the same transaction as the matching event. |
 
 Still to come, each with its own migration: `worker_leases` (Phase 4), `workflow_timers` and
-`workflow_signals` (Phase 5), `idempotency_records` (Phase 3).
+`workflow_signals` (Phase 5).
+
+The fake payment and email services keep their own tables (`payment_refunds`, `emails`) in a separate
+database (`fake_services`), created with `create_all` rather than migrations. They are "the outside
+world", not part of the runtime schema.
 
 ## Guarantees the database enforces
 
@@ -27,7 +32,7 @@ Still to come, each with its own migration: `worker_leases` (Phase 4), `workflow
 | Events are never changed or deleted | `BEFORE UPDATE OR DELETE` trigger raises `restrict_violation`. |
 | Sequence numbers are unique per run | `UNIQUE (run_id, sequence_number)` |
 | A step completes at most once per run | Partial unique index on `(run_id, step_name) WHERE event_type = 'STEP_COMPLETED'` |
-| Only known statuses and event types | `CHECK` constraints (migration `0002` added `WORKFLOW_RESUMED`) |
+| Only known statuses and event types | `CHECK` constraints (`0002` added `WORKFLOW_RESUMED`; `0003` added `NEEDS_REVIEW`, `STEP_OUTCOME_UNKNOWN` and `STEP_RESOLVED`) |
 | A run references a real workflow version | Composite foreign key |
 
 `TRUNCATE` is intentionally not blocked so tests can reset state. Operators with table-owner rights

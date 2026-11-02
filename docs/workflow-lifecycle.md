@@ -9,6 +9,8 @@ stateDiagram-v2
     RUNNING --> COMPLETED: workflow returned
     RUNNING --> FAILED: workflow or step raised
     RUNNING --> RUNNING: resume_run after a crash
+    RUNNING --> NEEDS_REVIEW: a step's outcome is unknown
+    NEEDS_REVIEW --> RUNNING: a person resolves the step
 ```
 
 `WAITING` and `CANCELLED` arrive with timers, signals and cancellation in later phases.
@@ -41,6 +43,8 @@ sequenceDiagram
 | Event | When |
 |---|---|
 | `WORKFLOW_STARTED` | The run moved from PENDING to RUNNING |
+| `STEP_OUTCOME_UNKNOWN` | A non-idempotent effect's outcome cannot be established; the run moves to `NEEDS_REVIEW` |
+| `STEP_RESOLVED` | A reviewer answered (`completed`, `failed` or `not_executed`) and who decided; for `completed` this is the step's completion record |
 | `WORKFLOW_RESUMED` | `resume_run` started replaying a crashed run; carries counts of completed, failed and in-doubt steps |
 | `STEP_STARTED` | Before the step function is called; carries the input hash |
 | `STEP_COMPLETED` | The step returned; carries the JSON result |
@@ -55,13 +59,14 @@ sequenceDiagram
 - Put anything with side effects or nondeterminism inside a step, never directly in the workflow body.
   Use `await ctx.now()`, `await ctx.random()` and `await ctx.llm(...)` for time, randomness and models.
 - Handle step failures with `except StepFailedError`.
+- Use `ctx.effect`, not `ctx.step`, for anything with a real-world side effect.
 
 The full list, with the reasons, is in [replay-and-recovery.md](replay-and-recovery.md).
 
 ## Current limitations (honest list)
 
-- A step with an external side effect can run twice if the worker dies between the effect and
-  `STEP_STARTED`'s outcome being recorded; idempotency fixes this in Phase 3.
+- Protection against duplicate effects depends on the external system honoring idempotency keys (or a
+  verify hook, or a human); see [idempotency.md](idempotency.md).
 - Nothing resumes crashed runs automatically, and `resume_run` is only safe when the old executor is
   dead. Worker processes, leases and fencing are Phase 4.
 - Execution runs inside the API process, not in worker processes. (Phase 4)

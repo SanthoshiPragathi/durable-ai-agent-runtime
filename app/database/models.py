@@ -37,6 +37,16 @@ class RunStatus(enum.StrEnum):
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    # A step with an external effect has an unknown outcome; a person must resolve it.
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+
+
+class IdempotencyStatus(enum.StrEnum):
+    IN_FLIGHT = "IN_FLIGHT"  # the call was started; no outcome recorded yet
+    SUCCEEDED = "SUCCEEDED"
+    RECONCILED = "RECONCILED"  # completed after checking with the external service or a person
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
 
 
 class EventType(enum.StrEnum):
@@ -45,6 +55,8 @@ class EventType(enum.StrEnum):
     STEP_STARTED = "STEP_STARTED"
     STEP_COMPLETED = "STEP_COMPLETED"
     STEP_FAILED = "STEP_FAILED"
+    STEP_OUTCOME_UNKNOWN = "STEP_OUTCOME_UNKNOWN"
+    STEP_RESOLVED = "STEP_RESOLVED"
     WORKFLOW_COMPLETED = "WORKFLOW_COMPLETED"
     WORKFLOW_FAILED = "WORKFLOW_FAILED"
 
@@ -128,5 +140,37 @@ class WorkflowEvent(Base):
     input_hash: Mapped[str | None] = mapped_column(String(64))
     result_data: Mapped[Any] = _json_column()
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class IdempotencyRecord(Base):
+    """Tracks one external operation, keyed by its idempotency key (e.g. "<run_id>:process_refund").
+
+    The row says what the runtime knows about the call: still in flight, succeeded, reconciled,
+    failed or unknown, how many attempts were made, and the recorded result. It never claims the
+    external system did or did not act; the external system's own ledger is the authority on that.
+    """
+
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_sql_list(IdempotencyStatus)})", name="ck_idempotency_records_status"
+        ),
+        Index("ix_idempotency_records_run_id", "run_id"),
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(String(400), primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_runs.run_id"), nullable=False
+    )
+    step_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    result_data: Mapped[Any] = _json_column()
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
