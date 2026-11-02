@@ -1,7 +1,7 @@
 # Runtime dependencies
 fastapi>=0.115
 uvicorn[standard]>=0.30
-sqlalchemy>=2.0
+sqlalchemy[asyncio]>=2.0
 alembic>=1.13
 psycopg[binary]>=3.2   # sync driver, used only by Alembic
 asyncpg>=0.29            # async driver used by the runtime
