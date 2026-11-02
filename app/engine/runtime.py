@@ -4,9 +4,10 @@ Limitations (all addressed in later phases, none hidden):
   * Execution happens in whatever process calls execute_run()/resume_run(); there are no worker
     processes or leases yet (Phase 4). resume_run() must only be called when the previous
     executor is known to be dead: two live executors of one run would both execute steps.
-  * A step that was STARTED but has no recorded outcome (the worker died mid-step) is run again.
-    That is at-least-once, so a step with an external side effect can happen twice. Phase 3 adds
-    idempotency keys and OUTCOME_UNKNOWN to close that gap.
+  * A plain ctx.step that was STARTED but has no recorded outcome (the worker died mid-step) is
+    run again, so only repeat-safe work belongs in ctx.step. A ctx.effect step is reconciled
+    instead: retried with its idempotency key, checked with its verify hook, or parked as
+    OUTCOME_UNKNOWN (run status NEEDS_REVIEW) when nothing can tell whether it happened.
 """
 
 import logging
@@ -18,6 +19,8 @@ from app.database.repositories import EventRepository, RunRepository
 from app.database.session import SessionFactory
 from app.engine.errors import (
     InvalidRunStateError,
+    NonDeterminismError,
+    OutcomeUnknownError,
     RunNotFoundError,
     WorkflowVersionMismatchError,
     format_error,
@@ -139,13 +142,19 @@ async def _drive(
         result = normalize_json(await definition.fn(ctx, **input_data))
         ctx.verify_replay_complete()
     except Exception as exc:
-        if ctx.divergence is not None:
+        halt = ctx.halt
+        if isinstance(halt, NonDeterminismError):
             # The code no longer matches the history. This is not the workflow failing, so the run
             # stays RUNNING for someone to fix the code and resume; it is never silently "failed".
-            logger.error("replay diverged", extra={"run_id": str(run_id), "error": str(ctx.divergence)})
-            raise ctx.divergence from None
-        logger.info("workflow run failed", extra={"run_id": str(run_id), "error": repr(exc)})
-        await _record_failure(session_factory, run_id, exc)
+            logger.error("replay diverged", extra={"run_id": str(run_id), "error": str(halt)})
+            raise halt from None
+        if isinstance(halt, OutcomeUnknownError):
+            # The recorder already moved the run to NEEDS_REVIEW. Nothing more executes until a
+            # person resolves the step; this is not a failed workflow either.
+            logger.warning("run needs review", extra={"run_id": str(run_id), "error": str(halt)})
+        else:
+            logger.info("workflow run failed", extra={"run_id": str(run_id), "error": repr(exc)})
+            await _record_failure(session_factory, run_id, exc)
     else:
         failpoint("before_workflow_completed")
         await _record_success(session_factory, run_id, result)

@@ -7,9 +7,11 @@ is matched, in order, against the recorded steps:
     ------------------    -------------------------------------------------------------
     COMPLETED             return the saved result; do NOT call the function again
     FAILED                raise StepFailedError again, as the first run did
-    IN_DOUBT              STEP_STARTED but no outcome: the worker died mid-step. The step is
-                          run again (at-least-once). Phase 3 replaces "run again" with
-                          idempotency keys / OUTCOME_UNKNOWN for steps with side effects.
+    IN_DOUBT              STEP_STARTED but no outcome: the worker died mid-step. A plain step is
+                          run again. A ctx.effect step is reconciled first: an idempotent one is
+                          called again with the same key; a non-idempotent one is checked with its
+                          verify hook, or becomes OUTCOME_UNKNOWN if nothing can tell.
+    UNKNOWN               STEP_OUTCOME_UNKNOWN recorded and not yet resolved by a person
     (no record)           history exhausted: run live and record as usual
 
 Name or input mismatches mean the workflow code changed since the history was written; that is
@@ -29,6 +31,7 @@ class StepStatus(enum.StrEnum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     IN_DOUBT = "IN_DOUBT"
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclass
@@ -40,6 +43,8 @@ class RecordedStep:
     error_type: str | None = None
     error_message: str | None = None
     attempts: int = 1  # how many times STEP_STARTED was recorded for this step
+    # A person confirmed the effect did NOT happen, so it is safe to run it without reconciling.
+    confirmed_not_executed: bool = False
 
 
 class EventLike(Protocol):
@@ -85,6 +90,32 @@ class ReplayHistory:
                     if existing.status != StepStatus.IN_DOUBT:
                         raise CorruptHistoryError(f"step {name!r} started again after it finished")
                     existing.attempts += 1
+
+            elif kind == EventType.STEP_OUTCOME_UNKNOWN:
+                record = by_name.get(name or "")
+                if record is None or record.status != StepStatus.IN_DOUBT:
+                    raise CorruptHistoryError(f"unknown outcome for step {name!r} without a start")
+                record.status = StepStatus.UNKNOWN
+                record.error_message = (event.result_data or {}).get("reason")
+
+            elif kind == EventType.STEP_RESOLVED:
+                record = by_name.get(name or "")
+                if record is None or record.status != StepStatus.UNKNOWN:
+                    raise CorruptHistoryError(f"resolution for step {name!r} that was not unknown")
+                details = event.result_data or {}
+                outcome = details.get("outcome")
+                if outcome == "completed":
+                    record.status = StepStatus.COMPLETED
+                    record.result = details.get("result")
+                elif outcome == "failed":
+                    record.status = StepStatus.FAILED
+                    record.error_type = "ResolvedAsFailed"
+                    record.error_message = details.get("message") or "marked failed by a reviewer"
+                elif outcome == "not_executed":
+                    record.status = StepStatus.IN_DOUBT
+                    record.confirmed_not_executed = True
+                else:
+                    raise CorruptHistoryError(f"unknown resolution outcome {outcome!r}")
 
             elif kind in (EventType.STEP_COMPLETED, EventType.STEP_FAILED):
                 record = by_name.get(name or "")
