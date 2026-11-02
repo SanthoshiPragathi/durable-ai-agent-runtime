@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -64,3 +64,26 @@ class EmailOut(BaseModel):
     to: str
     subject: str
     idempotency_key: str | None = None
+
+
+class ResolveStepRequest(BaseModel):
+    outcome: Literal["completed", "failed", "not_executed"] = Field(
+        description="completed: the effect happened (give `result`); failed: it did not happen and "
+        "must not be retried; not_executed: it did not happen, safe to run now"
+    )
+    result: Any = Field(default=None, description="Required when outcome is 'completed'")
+    message: str | None = None
+    resolved_by: str = "api"
+
+
+class ExternalOperationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    idempotency_key: str
+    run_id: uuid.UUID
+    step_name: str
+    status: str
+    attempts: int
+    result_data: Any = None
+    created_at: datetime
+    updated_at: datetime

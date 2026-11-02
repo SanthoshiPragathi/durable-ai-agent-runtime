@@ -82,6 +82,10 @@ class WorkflowVersionMismatchError(DurableRuntimeError):
     """The registered workflow version differs from the version the run was started with."""
 
 
+class InvalidResolutionError(DurableRuntimeError):
+    """A reviewer's resolution of an unknown step is not valid (wrong step or unknown outcome)."""
+
+
 class LLMConfigurationError(DurableRuntimeError):
     """No usable LLM provider is configured."""
 

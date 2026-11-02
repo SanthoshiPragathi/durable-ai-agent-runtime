@@ -5,10 +5,12 @@ import logging
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-import app.examples.simple_workflow  # noqa: F401  (importing registers the example workflow)
+import app.examples.refund_workflow  # noqa: F401  (importing registers the example workflows)
+import app.examples.simple_workflow  # noqa: F401
 from app.api.routes import runs, services, workflows
 from app.engine.errors import (
     DurableRuntimeError,
+    InvalidResolutionError,
     InvalidRunStateError,
     InvalidWorkflowInputError,
     RunNotFoundError,
@@ -33,6 +35,7 @@ _STATUS_BY_ERROR: dict[type[DurableRuntimeError], int] = {
     InvalidWorkflowInputError: 422,
     StepSerializationError: 422,
     InvalidRunStateError: status.HTTP_409_CONFLICT,
+    InvalidResolutionError: 422,
 }
 
 
