@@ -6,8 +6,10 @@ the engine loads when a run is resumed. That keeps this module unit-testable wit
 """
 
 import inspect
+import random as _random
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from app.engine.errors import (
@@ -39,10 +41,16 @@ class WorkflowContext:
         run_id: uuid.UUID,
         recorder: StepRecorder,
         replay: ReplayHistory | None = None,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        rng: Callable[[], float] | None = None,
     ) -> None:
         self.run_id = run_id
         self._recorder = recorder
         self._replay = replay or ReplayHistory()
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._rng = rng or _random.random
+        self._auto_counters: dict[str, int] = {}
         self._used_step_names: set[str] = set()
         self._step_index = 0
         self._divergence: NonDeterminismError | None = None
@@ -64,6 +72,28 @@ class WorkflowContext:
         """
         input_hash = hash_step_input(args, kwargs)
         return await self._execute(name, input_hash, lambda: fn(*args, **kwargs))
+
+    async def now(self) -> datetime:
+        """The current UTC time, recorded. A replay returns the originally recorded instant.
+
+        Never call datetime.now() directly in a workflow: replay would see a different time and
+        could take a different branch.
+        """
+        recorded = await self._execute(
+            self._auto_name("now"),
+            hash_step_input((), {}),
+            lambda: self._clock().astimezone(UTC).isoformat(),
+        )
+        return datetime.fromisoformat(recorded)
+
+    async def random(self) -> float:
+        """A random float in [0, 1), recorded. A replay returns the originally drawn value."""
+        return await self._execute(self._auto_name("random"), hash_step_input((), {}), self._rng)
+
+    def _auto_name(self, kind: str) -> str:
+        # Deterministic names, so replay matches the n-th now()/random() call with its recording.
+        self._auto_counters[kind] = self._auto_counters.get(kind, 0) + 1
+        return f"__{kind}_{self._auto_counters[kind]}"
 
     async def _execute(self, name: str, input_hash: str, call: Callable[[], Any]) -> Any:
         if self._divergence is not None:
