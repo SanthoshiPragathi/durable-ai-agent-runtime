@@ -1,0 +1,33 @@
+# Secrets - never commit these
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local databases / data
+pgdata/
+*.sqlite3
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Frontend (later phase)
+node_modules/
