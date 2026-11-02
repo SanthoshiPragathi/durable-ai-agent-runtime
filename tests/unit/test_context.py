@@ -1,27 +1,11 @@
 import uuid
-from typing import Any
 
 import pytest
 
 from app.engine.errors import DuplicateStepNameError, StepFailedError, StepSerializationError
 from app.engine.hashing import hash_step_input
 from app.sdk import WorkflowContext
-
-
-class FakeRecorder:
-    """Collects what ctx.step reports, in order."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, Any]] = []
-
-    async def step_started(self, step_name: str, input_hash: str) -> None:
-        self.calls.append(("started", step_name, input_hash))
-
-    async def step_completed(self, step_name: str, result: Any) -> None:
-        self.calls.append(("completed", step_name, result))
-
-    async def step_failed(self, step_name: str, error: BaseException) -> None:
-        self.calls.append(("failed", step_name, type(error).__name__))
+from tests.fixtures.recorders import FakeRecorder
 
 
 @pytest.fixture
