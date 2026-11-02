@@ -23,8 +23,12 @@ markers = [
 ]
 
 [tool.ruff]
-line-length = 100
+line-length = 110
 target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's Depends() in argument defaults is the framework's standard pattern.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]

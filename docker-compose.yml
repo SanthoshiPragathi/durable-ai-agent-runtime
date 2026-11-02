@@ -20,8 +20,8 @@ services:
   api:
     build: .
     environment:
-      DATABASE_URL: postgresql+psycopg://durable:durable@postgres:5432/durable
-      SERVICES_DATABASE_URL: postgresql+psycopg://durable:durable@postgres:5432/fake_services
+      DATABASE_URL: postgresql+asyncpg://durable:durable@postgres:5432/durable
+      SERVICES_DATABASE_URL: postgresql+asyncpg://durable:durable@postgres:5432/fake_services
     ports:
       - "8000:8000"
     depends_on:
