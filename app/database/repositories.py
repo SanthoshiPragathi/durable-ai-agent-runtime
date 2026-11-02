@@ -5,10 +5,19 @@ import uuid
 from typing import Any
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import EventType, RunStatus, Workflow, WorkflowEvent, WorkflowRun
+from app.database.models import (
+    EventType,
+    IdempotencyRecord,
+    IdempotencyStatus,
+    RunStatus,
+    Workflow,
+    WorkflowEvent,
+    WorkflowRun,
+)
 from app.engine.errors import DuplicateEventError, InvalidRunStateError, RunNotFoundError
 
 
@@ -86,6 +95,24 @@ class RunRepository:
     async def mark_failed(self, run_id: uuid.UUID, error_message: str) -> None:
         await self._finish(run_id, RunStatus.FAILED, error_message=error_message)
 
+    async def mark_needs_review(self, run_id: uuid.UUID) -> None:
+        """RUNNING -> NEEDS_REVIEW: a step has an unknown outcome and execution must stop."""
+        await self._transition(run_id, RunStatus.RUNNING, RunStatus.NEEDS_REVIEW)
+
+    async def reopen(self, run_id: uuid.UUID) -> None:
+        """NEEDS_REVIEW -> RUNNING, after a person resolved the unknown step."""
+        await self._transition(run_id, RunStatus.NEEDS_REVIEW, RunStatus.RUNNING)
+
+    async def _transition(self, run_id: uuid.UUID, source: RunStatus, target: RunStatus) -> None:
+        result = await self._session.execute(
+            update(WorkflowRun)
+            .where(WorkflowRun.run_id == run_id, WorkflowRun.status == source.value)
+            .values(status=target.value)
+            .returning(WorkflowRun.run_id)
+        )
+        if result.scalar_one_or_none() is None:
+            raise InvalidRunStateError(f"run {run_id} is not {source.value}; cannot move to {target.value}")
+
     async def _finish(self, run_id: uuid.UUID, status: RunStatus, **values: Any) -> None:
         result = await self._session.execute(
             update(WorkflowRun)
@@ -156,5 +183,58 @@ class EventRepository:
             select(WorkflowEvent)
             .where(WorkflowEvent.run_id == run_id)
             .order_by(WorkflowEvent.sequence_number)
+        )
+        return list(result.scalars())
+
+
+class IdempotencyRepository:
+    """Status of external operations, one row per idempotency key."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def mark_in_flight(self, key: str, run_id: uuid.UUID, step_name: str) -> None:
+        """Insert the row, or count another attempt if the key is already known."""
+        stmt = pg_insert(IdempotencyRecord).values(
+            idempotency_key=key,
+            run_id=run_id,
+            step_name=step_name,
+            status=IdempotencyStatus.IN_FLIGHT.value,
+            attempts=1,
+        )
+        await self._session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["idempotency_key"],
+                set_={
+                    "status": IdempotencyStatus.IN_FLIGHT.value,
+                    "attempts": IdempotencyRecord.attempts + 1,
+                    "updated_at": func.now(),
+                },
+            )
+        )
+
+    async def add_attempt(self, key: str) -> None:
+        await self._session.execute(
+            update(IdempotencyRecord)
+            .where(IdempotencyRecord.idempotency_key == key)
+            .values(attempts=IdempotencyRecord.attempts + 1, updated_at=func.now())
+        )
+
+    async def set_status(self, key: str, status: IdempotencyStatus, result: Any = None) -> None:
+        values: dict[str, Any] = {"status": status.value, "updated_at": func.now()}
+        if status in (IdempotencyStatus.SUCCEEDED, IdempotencyStatus.RECONCILED):
+            values["result_data"] = result
+        await self._session.execute(
+            update(IdempotencyRecord).where(IdempotencyRecord.idempotency_key == key).values(**values)
+        )
+
+    async def get(self, key: str) -> IdempotencyRecord | None:
+        return await self._session.get(IdempotencyRecord, key)
+
+    async def list_for_run(self, run_id: uuid.UUID) -> list[IdempotencyRecord]:
+        result = await self._session.execute(
+            select(IdempotencyRecord)
+            .where(IdempotencyRecord.run_id == run_id)
+            .order_by(IdempotencyRecord.created_at, IdempotencyRecord.idempotency_key)
         )
         return list(result.scalars())
