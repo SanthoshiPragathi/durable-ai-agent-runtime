@@ -8,6 +8,7 @@ stateDiagram-v2
     PENDING --> RUNNING: execute_run (atomic)
     RUNNING --> COMPLETED: workflow returned
     RUNNING --> FAILED: workflow or step raised
+    RUNNING --> RUNNING: resume_run after a crash
 ```
 
 `WAITING` and `CANCELLED` arrive with timers, signals and cancellation in later phases.
@@ -40,6 +41,7 @@ sequenceDiagram
 | Event | When |
 |---|---|
 | `WORKFLOW_STARTED` | The run moved from PENDING to RUNNING |
+| `WORKFLOW_RESUMED` | `resume_run` started replaying a crashed run; carries counts of completed, failed and in-doubt steps |
 | `STEP_STARTED` | Before the step function is called; carries the input hash |
 | `STEP_COMPLETED` | The step returned; carries the JSON result |
 | `STEP_FAILED` | The step raised; carries error type and message (no stack trace) |
@@ -51,11 +53,16 @@ sequenceDiagram
 - Arguments and results of `ctx.step` must be JSON-serializable.
 - Step names must be unique within a run; in a loop use `f"fetch_{i}"`.
 - Put anything with side effects or nondeterminism inside a step, never directly in the workflow body.
-  Replay (Phase 2) will re-run the workflow body, so only steps are safe to skip.
+  Use `await ctx.now()`, `await ctx.random()` and `await ctx.llm(...)` for time, randomness and models.
+- Handle step failures with `except StepFailedError`.
+
+The full list, with the reasons, is in [replay-and-recovery.md](replay-and-recovery.md).
 
 ## Current limitations (honest list)
 
-- No replay: a crash mid-run leaves the run `RUNNING`; it is not resumed yet. (Phase 2)
+- A step with an external side effect can run twice if the worker dies between the effect and
+  `STEP_STARTED`'s outcome being recorded; idempotency fixes this in Phase 3.
+- Nothing resumes crashed runs automatically, and `resume_run` is only safe when the old executor is
+  dead. Worker processes, leases and fencing are Phase 4.
 - Execution runs inside the API process, not in worker processes. (Phase 4)
-- A step that is `STEP_STARTED` with no outcome after a crash cannot be reconciled yet. (Phase 3)
 - Failed steps are not retried; there are no retry limits or backoff yet.
