@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from app.engine.errors import DuplicateStepNameError
+from app.engine.errors import DuplicateStepNameError, StepFailedError
 from app.engine.hashing import hash_step_input, normalize_json
 
 
@@ -36,6 +36,8 @@ class WorkflowContext:
 
         Arguments and the result must be JSON-serializable. Step names must be unique within
         a run (in a loop, put the index in the name: f"fetch_{i}").
+
+        If `fn` raises, the failure is recorded and StepFailedError is raised (see its docs).
         """
         if name in self._used_step_names:
             raise DuplicateStepNameError(f"step name {name!r} was already used in this run")
@@ -50,6 +52,6 @@ class WorkflowContext:
             result = normalize_json(result)
         except Exception as exc:
             await self._recorder.step_failed(name, exc)
-            raise
+            raise StepFailedError(name, type(exc).__name__, str(exc)) from exc
         await self._recorder.step_completed(name, result)
         return result
