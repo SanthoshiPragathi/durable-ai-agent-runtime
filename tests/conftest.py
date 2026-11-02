@@ -21,6 +21,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import to_sync_url
 from app.database.session import SessionFactory, create_session_factory
+from app.sdk.workflow import registry
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TEST_URL = "postgresql+asyncpg://durable:durable@localhost:5432/durable_test"
@@ -88,3 +89,12 @@ async def session_factory(clean_db: None, migrated_database: str) -> AsyncIterat
     yield create_session_factory(engine)
     await engine.dispose()
 
+
+
+@pytest.fixture
+def isolated_registry() -> Iterator[None]:
+    """Give a test an empty workflow registry and restore the previous one afterwards."""
+    saved = registry.snapshot()
+    registry.clear()
+    yield
+    registry.restore(saved)
