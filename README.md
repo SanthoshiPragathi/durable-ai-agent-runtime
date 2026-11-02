@@ -2,9 +2,10 @@
 
 A fault-tolerant execution engine for AI workflows: crash-safe, replayable, and forkable.
 
-> **Status: Phase 2 (deterministic replay).** Workflows run, every step is recorded in PostgreSQL, and a
-> crashed run can be resumed from its history. Idempotency, worker processes, timers, signals and forking
-> are **not implemented yet** (see the roadmap). This README is updated at every milestone so it never claims more than the code does.
+> **Status: Phase 3 (idempotency).** Workflows run, every step is recorded in PostgreSQL, a crashed run
+> resumes from its history, and calls with real-world effects (payments, emails) are protected against
+> duplicates where the external system allows it. Worker processes, leases, timers, signals and forking are
+> **not implemented yet** (see the roadmap). This README is updated at every milestone so it never claims more than the code does.
 
 ## The problem
 
@@ -35,7 +36,7 @@ It does *not* claim universal exactly-once execution, which is impossible in gen
 | 0 | Environment, Git, project skeleton | done |
 | 1 | Workflow SDK, schema, event persistence, basic API | done |
 | 2 | Deterministic replay, recorded time/random/LLM | done |
-| 3 | Idempotency, fake payment/email services, OUTCOME_UNKNOWN | todo |
+| 3 | Idempotency, fake payment/email services, OUTCOME_UNKNOWN | done |
 | 4 | Multi-worker, leases, heartbeats, fencing | todo |
 | 5 | Durable timers and signals | todo |
 | 6 | Forking and run diff | todo |
@@ -63,52 +64,59 @@ docs/             design documents
 scripts/          helper scripts
 ```
 
-## What works today (Phase 2)
+## What works today (Phase 3)
 
 ```python
 from app.sdk import workflow
 
 @workflow
 async def refund(ctx, order_id: str):
-    order = await ctx.step("fetch_order", fetch_order, order_id)
-    decision = await ctx.llm("refund_decision", prompt=f"Refund order {order_id}?")
-    when = await ctx.now()
-    if decision == "APPROVE":
-        return await ctx.step("process_refund", process_refund, order["amount"])
-    return "rejected"
+    order = await ctx.step("fetch_order", fetch_order, order_id)          # safe to repeat
+    verdict = await ctx.llm("classify", prompt=f"Refund order {order_id}? APPROVE or REJECT")
+    if verdict != "APPROVE":
+        return "rejected"
+    refund = await ctx.effect("process_refund", payments.refund,           # real-world effect
+                              order_id, order["amount"], idempotent=True)
+    await ctx.effect("send_email", emails.send, order["email"], "Refunded", "...", idempotent=True)
+    return refund
 ```
 
-- `ctx.step(name, fn, *args)` runs `fn` and records `STEP_STARTED` and `STEP_COMPLETED`/`STEP_FAILED`
-  (one committed transaction per event). A failing step raises `StepFailedError`.
-- `await ctx.now()`, `await ctx.random()` and `await ctx.llm(name, prompt=...)` record their value, so a
-  replay returns the same timestamp, number or model answer. LLM calls also record model, prompt hash,
-  tokens, estimated cost and latency. A free mock provider is the default; OpenAI is optional.
-- **Resume:** `resume_run` re-runs a crashed `RUNNING` run from its history. Completed steps return
-  their saved results without executing; execution continues at the first step with no outcome.
-- **Divergence detection:** a changed step name, changed input (e.g. refund `2000` -> `3000`) or removed
-  step raises `NonDeterminismError` instead of silently reusing an unrelated result.
+- **`ctx.step`** runs repeat-safe work and records it. A failing step raises `StepFailedError`.
+- **`ctx.effect`** runs calls with real-world effects. An idempotent tool gets a stable key
+  (`<run_id>:<step>`) and is retried with the *same* key after a crash or timeout, so it cannot act twice.
+  A non-idempotent tool is never retried blindly: the runtime asks its `verify` hook whether the effect
+  happened, and otherwise records `STEP_OUTCOME_UNKNOWN` and parks the run in `NEEDS_REVIEW` until a person
+  resolves it through the API.
+- **`ctx.now()`, `ctx.random()`, `ctx.llm()`** record their value, so a replay returns the same timestamp,
+  number or model answer (LLM calls also record model, prompt hash, tokens, cost and latency).
+- **Resume:** `resume_run` re-runs a crashed `RUNNING` run from its history; completed steps return their
+  saved results without executing. A changed step name or input raises `NonDeterminismError`.
+- **Independent ledgers:** the fake payment and email services keep their own books in a separate database,
+  so tests compare the runtime's history against what the "outside world" actually recorded.
 - The event log is append-only (enforced by a PostgreSQL trigger) with per-run sequence numbers.
-- Step arguments and results must be JSON-serializable. Step names must be unique within a run.
 
-**Not yet:** if a worker dies *after* a step's side effect but *before* it is recorded, resume runs
-that step again, so the effect can happen twice (idempotency is Phase 3). Nothing resumes runs
-automatically and `resume_run` must only be called when the old executor is dead (workers and leases
-are Phase 4). Execution still happens inside the API process. `ctx.sleep/wait_for_signal/fork` do
-not exist yet.
+**Guarantee, stated honestly:** at-least-once execution with duplicate protection where the external system
+supports idempotency keys (or can be asked via a verify hook). It does not claim exactly-once.
 
-See [docs/replay-and-recovery.md](docs/replay-and-recovery.md) (what each crash leaves behind and how
-resume handles it), [docs/database-design.md](docs/database-design.md) and
-[docs/workflow-lifecycle.md](docs/workflow-lifecycle.md).
+**Not yet:** nothing resumes runs automatically, and `resume_run` must only be called when the old executor
+is dead (worker processes, leases and fencing are Phase 4). Execution still happens inside the API process.
+Idempotency keys are per run and step, so two separate runs for the same order are two operations.
+`ctx.sleep/wait_for_signal/fork` do not exist yet.
 
-## Demo: crash and recovery
+See [docs/idempotency.md](docs/idempotency.md) (decision table, review path, what is and is not protected,
+the bug the property test found), [docs/replay-and-recovery.md](docs/replay-and-recovery.md),
+[docs/database-design.md](docs/database-design.md) and [docs/workflow-lifecycle.md](docs/workflow-lifecycle.md).
+
+## Demos
 
 ```bash
-python scripts/demo_crash_recovery.py
+python scripts/demo_crash_recovery.py     # kill a worker mid-run, resume in a new process
+python scripts/demo_duplicate_refund.py   # worker dies after the refund succeeded: still ONE refund
 ```
 
-Starts a run in a worker process, kills the process at a controlled point, shows what survived in
-PostgreSQL, resumes the run in a new process, and prints the final timeline: completed steps appear
-once because the second process reused their saved results.
+The second demo kills the worker after the payment service processed the refund but before the runtime
+recorded it, resumes in a new process, and shows the payment service's own ledger: one refund, the same
+`refund_id` before and after.
 
 ## Getting started
 
@@ -141,11 +149,13 @@ curl localhost:8000/runs/<run_id>/events      # the recorded timeline
 pytest                         # everything
 pytest -m "not integration"    # unit tests only, no database needed
 pytest -m recovery             # crash/resume tests, including killed worker processes
+pytest -m chaos                # randomized crash test (CHAOS_EXAMPLES=400 for a longer run)
 ```
 
 Integration tests use the database in `TEST_DATABASE_URL` (default
 `postgresql+asyncpg://durable:durable@localhost:5432/durable_test`). It is created if missing and its
 schema is **dropped and rebuilt** at the start of each test session, so the name must end in `_test`.
+The fake services use `TEST_SERVICES_DATABASE_URL` (default `.../durable_services_test`) the same way.
 If PostgreSQL is unreachable the integration tests are reported as skipped, not passed.
 
 ## License

@@ -58,7 +58,7 @@ step functions append to, independent of the database.
 | Before the first step (`after_workflow_started`) | `WORKFLOW_STARTED` | Empty history; runs every step live | No: nothing ran yet |
 | Before `STEP_STARTED` (`before_step_started`) | Earlier steps completed | Replays them, runs this step live | No: the step never started |
 | After `STEP_STARTED`, before the step ran (`after_step_started`) | `STEP_STARTED`, no outcome | Step is "in doubt": runs it again | No in this case, but the history cannot prove that (see next row) |
-| **After the step's effect, before `STEP_COMPLETED` (`before_step_completed`)** | `STEP_STARTED`, no outcome; **the effect happened** | Indistinguishable from the row above, so it runs the step again | **Yes in Phase 2.** Ledger shows two refunds. Closed by idempotency keys in Phase 3 |
+| **After the step's effect, before `STEP_COMPLETED` (`before_step_completed`)** | `STEP_STARTED`, no outcome; **the effect happened** | Indistinguishable from the row above. A plain `ctx.step` runs again; a `ctx.effect` is reconciled (same idempotency key, verify hook, or review) | **Plain `ctx.step`: yes** (ledger shows two refunds). **`ctx.effect`: no**, see [idempotency.md](idempotency.md) |
 | Right after `STEP_COMPLETED` (`after_step_completed`) | The step's result | Replays it, continues with the next step | No |
 | After the last step, before `WORKFLOW_COMPLETED` (`before_workflow_completed`) | All steps completed | Replays everything, records completion | No: nothing re-executes |
 | Several workers die in a row | Whatever each one committed | Each resume re-runs only the step it died in | Only the in-doubt window above |
@@ -102,9 +102,9 @@ unset, which is always the case in normal operation, nothing happens.
 
 ## Limitations (honest list)
 
-- **At-least-once, not exactly-once.** The in-doubt window above can repeat a step with a side
-  effect. Phase 3 adds idempotency keys, an external ledger and `OUTCOME_UNKNOWN` for tools that
-  cannot be retried safely.
+- **At-least-once, not exactly-once.** A plain `ctx.step` in the in-doubt window runs again, so it must
+  be repeat-safe. Calls with side effects use `ctx.effect` (Phase 3: idempotency keys, verify hooks,
+  `OUTCOME_UNKNOWN`), which is only as safe as the external system allows.
 - **Nothing resumes runs automatically yet.** `resume_run` is called by a person or script, and it
   must only be called when the old executor is known to be dead: two live executors of one run
   would both run steps. Phase 4 adds worker processes, leases and fencing so this is automatic and safe.
