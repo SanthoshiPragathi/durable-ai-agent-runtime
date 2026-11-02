@@ -11,6 +11,7 @@ from app.database.models import EventType
 from app.database.repositories import EventRepository, RunRepository
 from app.database.session import SessionFactory
 from app.engine.errors import format_error
+from app.engine.failpoints import failpoint
 
 
 class DbStepRecorder:
@@ -19,17 +20,23 @@ class DbStepRecorder:
         self._session_factory = session_factory
 
     async def step_started(self, step_name: str, input_hash: str) -> None:
+        failpoint("before_step_started", step_name)
         async with self._session_factory() as session, session.begin():
             await EventRepository(session).append(
                 self._run_id, EventType.STEP_STARTED, step_name=step_name, input_hash=input_hash
             )
             await RunRepository(session).set_current_step(self._run_id, step_name)
+        failpoint("after_step_started", step_name)
 
     async def step_completed(self, step_name: str, result: Any) -> None:
+        # The step function has already run: a crash here is the dangerous window where its effect
+        # happened but was never recorded.
+        failpoint("before_step_completed", step_name)
         async with self._session_factory() as session, session.begin():
             await EventRepository(session).append(
                 self._run_id, EventType.STEP_COMPLETED, step_name=step_name, result_data=result
             )
+        failpoint("after_step_completed", step_name)
 
     async def step_failed(self, step_name: str, error: BaseException) -> None:
         async with self._session_factory() as session, session.begin():
