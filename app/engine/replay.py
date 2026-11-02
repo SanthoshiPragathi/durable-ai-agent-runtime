@@ -90,6 +90,11 @@ class ReplayHistory:
                     if existing.status != StepStatus.IN_DOUBT:
                         raise CorruptHistoryError(f"step {name!r} started again after it finished")
                     existing.attempts += 1
+                    # A reviewer's "not executed" covers only the attempt that follows it. Once a
+                    # new attempt has started, that attempt may have acted, so the earlier answer
+                    # is stale. (Found by the property test: without this reset a second crash
+                    # skipped reconciliation and refunded twice.)
+                    existing.confirmed_not_executed = False
 
             elif kind == EventType.STEP_OUTCOME_UNKNOWN:
                 record = by_name.get(name or "")

@@ -375,3 +375,31 @@ def test_a_step_run_again_after_being_resolved_not_executed_counts_a_new_attempt
         ]
     )
     assert (history.steps[0].status, history.steps[0].attempts) == (StepStatus.COMPLETED, 2)
+
+
+def test_a_reviewers_not_executed_answer_expires_once_a_new_attempt_has_started() -> None:
+    """Regression (found by the Hypothesis property test): 'not executed' only covers the attempt
+    that directly follows it. If that attempt starts and the worker dies again, the step is in
+    doubt again and must be reconciled again."""
+    history = ReplayHistory.from_events(
+        [
+            ev("STEP_STARTED", "process_refund", "h"),
+            ev("STEP_OUTCOME_UNKNOWN", "process_refund", result={"reason": "r"}),
+            ev("STEP_RESOLVED", "process_refund", result={"outcome": "not_executed"}),
+            ev("STEP_STARTED", "process_refund", "h"),  # the attempt the reviewer cleared... died
+        ]
+    )
+    step = history.steps[0]
+    assert (step.status, step.attempts, step.confirmed_not_executed) == (StepStatus.IN_DOUBT, 2, False)
+
+
+async def test_a_second_crash_after_a_cleared_attempt_is_not_blindly_retried() -> None:
+    step = RecordedStep(
+        "process_refund", hash_step_input(("ORD-1", 2500), {}), attempts=2, confirmed_not_executed=False
+    )
+    ctx, recorder = make_ctx(ReplayHistory([step]))
+    tool = Tool()
+
+    with pytest.raises(OutcomeUnknownError):
+        await ctx.effect("process_refund", tool.refund, "ORD-1", 2500, idempotent=False)
+    assert tool.calls == []

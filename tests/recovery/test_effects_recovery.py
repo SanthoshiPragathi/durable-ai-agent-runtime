@@ -469,6 +469,34 @@ async def test_only_one_of_two_simultaneous_resolutions_wins(
     assert event_types(events).count("STEP_RESOLVED") == 1
 
 
+async def test_regression_a_cleared_attempt_that_dies_again_is_reconciled_again(
+    session_factory: SessionFactory, legacy_payments: NonIdempotentPaymentService
+) -> None:
+    """Found by the Hypothesis property test. The reviewer correctly clears the step ('not
+    executed'); the cleared attempt then refunds and the worker dies again before recording it.
+    The reviewer's old answer must not cover this new attempt, or the refund is repeated."""
+    crash = CrashPlan()
+    crash.before.add("process_refund")
+    crash.after.add("process_refund")
+    register_legacy_refund(legacy_payments, crash, with_verify=False)
+    run_id = await start(session_factory, "legacy", order_id="ORD-1")
+
+    with pytest.raises(SimulatedCrash):  # dies before calling the provider
+        await runtime.execute_run(session_factory, run_id)
+    assert (await runtime.resume_run(session_factory, run_id)).status == "NEEDS_REVIEW"
+    assert await legacy_payments.count_refunds() == 0  # reviewer checks the books: nothing happened
+    await runtime.resolve_unknown_step(session_factory, run_id, "process_refund", outcome="not_executed")
+
+    with pytest.raises(SimulatedCrash):  # the cleared attempt refunds, then dies before recording it
+        await runtime.resume_run(session_factory, run_id)
+    assert await legacy_payments.count_refunds() == 1
+
+    again = await runtime.resume_run(session_factory, run_id)
+
+    assert again.status == "NEEDS_REVIEW"  # parked again, NOT retried
+    assert await legacy_payments.count_refunds() == 1  # no duplicate
+
+
 # ---- non-idempotent provider WITH a verify hook: reconciliation -----------------------------
 
 
