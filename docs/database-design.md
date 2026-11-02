@@ -27,7 +27,7 @@ Still to come, each with its own migration: `worker_leases` (Phase 4), `workflow
 | Events are never changed or deleted | `BEFORE UPDATE OR DELETE` trigger raises `restrict_violation`. |
 | Sequence numbers are unique per run | `UNIQUE (run_id, sequence_number)` |
 | A step completes at most once per run | Partial unique index on `(run_id, step_name) WHERE event_type = 'STEP_COMPLETED'` |
-| Only known statuses and event types | `CHECK` constraints |
+| Only known statuses and event types | `CHECK` constraints (migration `0002` added `WORKFLOW_RESUMED`) |
 | A run references a real workflow version | Composite foreign key |
 
 `TRUNCATE` is intentionally not blocked so tests can reset state. Operators with table-owner rights

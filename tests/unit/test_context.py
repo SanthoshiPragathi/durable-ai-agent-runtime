@@ -1,27 +1,11 @@
 import uuid
-from typing import Any
 
 import pytest
 
-from app.engine.errors import DuplicateStepNameError, StepSerializationError
+from app.engine.errors import DuplicateStepNameError, StepFailedError, StepSerializationError
 from app.engine.hashing import hash_step_input
 from app.sdk import WorkflowContext
-
-
-class FakeRecorder:
-    """Collects what ctx.step reports, in order."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, Any]] = []
-
-    async def step_started(self, step_name: str, input_hash: str) -> None:
-        self.calls.append(("started", step_name, input_hash))
-
-    async def step_completed(self, step_name: str, result: Any) -> None:
-        self.calls.append(("completed", step_name, result))
-
-    async def step_failed(self, step_name: str, error: BaseException) -> None:
-        self.calls.append(("failed", step_name, type(error).__name__))
+from tests.fixtures.recorders import FakeRecorder
 
 
 @pytest.fixture
@@ -57,20 +41,23 @@ async def test_result_is_json_normalized(ctx: WorkflowContext, recorder: FakeRec
     assert recorder.calls[-1] == ("completed", "pair", [1, 2])
 
 
-async def test_failing_step_is_recorded_and_reraised(ctx: WorkflowContext, recorder: FakeRecorder) -> None:
+async def test_failing_step_raises_step_failed(ctx: WorkflowContext, recorder: FakeRecorder) -> None:
     async def boom() -> None:
         raise ValueError("payment declined")
 
-    with pytest.raises(ValueError, match="payment declined"):
+    with pytest.raises(StepFailedError, match="payment declined") as caught:
         await ctx.step("charge", boom)
 
+    assert (caught.value.step_name, caught.value.error_type) == ("charge", "ValueError")
+    assert isinstance(caught.value.__cause__, ValueError)  # original chained on the first run
     assert [c[0] for c in recorder.calls] == ["started", "failed"]
     assert recorder.calls[-1] == ("failed", "charge", "ValueError")
 
 
 async def test_unserializable_result_fails_the_step(ctx: WorkflowContext, recorder: FakeRecorder) -> None:
-    with pytest.raises(StepSerializationError):
+    with pytest.raises(StepFailedError) as caught:
         await ctx.step("bad", lambda: object())
+    assert caught.value.error_type == "StepSerializationError"
     assert [c[0] for c in recorder.calls] == ["started", "failed"]
 
 

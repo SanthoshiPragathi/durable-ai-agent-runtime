@@ -2,9 +2,9 @@
 
 A fault-tolerant execution engine for AI workflows: crash-safe, replayable, and forkable.
 
-> **Status: Phase 1 (basic workflow engine).** Workflows run and every step is recorded in PostgreSQL.
-> Replay, crash recovery, idempotency, workers, timers, signals and forking are **not implemented yet**
-> (see the roadmap). This README is updated at every milestone so it never claims more than the code does.
+> **Status: Phase 2 (deterministic replay).** Workflows run, every step is recorded in PostgreSQL, and a
+> crashed run can be resumed from its history. Idempotency, worker processes, timers, signals and forking
+> are **not implemented yet** (see the roadmap). This README is updated at every milestone so it never claims more than the code does.
 
 ## The problem
 
@@ -34,7 +34,7 @@ It does *not* claim universal exactly-once execution, which is impossible in gen
 |---|---|---|
 | 0 | Environment, Git, project skeleton | done |
 | 1 | Workflow SDK, schema, event persistence, basic API | done |
-| 2 | Deterministic replay, recorded time/random/LLM | todo |
+| 2 | Deterministic replay, recorded time/random/LLM | done |
 | 3 | Idempotency, fake payment/email services, OUTCOME_UNKNOWN | todo |
 | 4 | Multi-worker, leases, heartbeats, fencing | todo |
 | 5 | Durable timers and signals | todo |
@@ -63,30 +63,52 @@ docs/             design documents
 scripts/          helper scripts
 ```
 
-## What works today (Phase 1)
+## What works today (Phase 2)
 
 ```python
 from app.sdk import workflow
 
 @workflow
-async def order_summary(ctx, order_id: str):
-    items = await ctx.step("fetch_order", fetch_order, order_id)
-    total = await ctx.step("calculate_total", calculate_total, items)
-    return {"order_id": order_id, "total": total}
+async def refund(ctx, order_id: str):
+    order = await ctx.step("fetch_order", fetch_order, order_id)
+    decision = await ctx.llm("refund_decision", prompt=f"Refund order {order_id}?")
+    when = await ctx.now()
+    if decision == "APPROVE":
+        return await ctx.step("process_refund", process_refund, order["amount"])
+    return "rejected"
 ```
 
-- `@workflow` registers an async function; `ctx.step(name, fn, *args)` runs `fn` and records
-  `STEP_STARTED` and `STEP_COMPLETED`/`STEP_FAILED` events (one committed transaction per event).
+- `ctx.step(name, fn, *args)` runs `fn` and records `STEP_STARTED` and `STEP_COMPLETED`/`STEP_FAILED`
+  (one committed transaction per event). A failing step raises `StepFailedError`.
+- `await ctx.now()`, `await ctx.random()` and `await ctx.llm(name, prompt=...)` record their value, so a
+  replay returns the same timestamp, number or model answer. LLM calls also record model, prompt hash,
+  tokens, estimated cost and latency. A free mock provider is the default; OpenAI is optional.
+- **Resume:** `resume_run` re-runs a crashed `RUNNING` run from its history. Completed steps return
+  their saved results without executing; execution continues at the first step with no outcome.
+- **Divergence detection:** a changed step name, changed input (e.g. refund `2000` -> `3000`) or removed
+  step raises `NonDeterminismError` instead of silently reusing an unrelated result.
+- The event log is append-only (enforced by a PostgreSQL trigger) with per-run sequence numbers.
 - Step arguments and results must be JSON-serializable. Step names must be unique within a run.
-- The event log is append-only, enforced by a PostgreSQL trigger, with per-run sequence numbers.
-- A run moves `PENDING -> RUNNING -> COMPLETED | FAILED`; starting the same run twice is rejected.
 
-**Not yet:** if the process dies mid-run the run stays `RUNNING` and cannot be resumed (replay is
-Phase 2), execution happens inside the API process (worker processes are Phase 4), and
-`ctx.llm/now/random/sleep/wait_for_signal/fork` do not exist yet.
+**Not yet:** if a worker dies *after* a step's side effect but *before* it is recorded, resume runs
+that step again, so the effect can happen twice (idempotency is Phase 3). Nothing resumes runs
+automatically and `resume_run` must only be called when the old executor is dead (workers and leases
+are Phase 4). Execution still happens inside the API process. `ctx.sleep/wait_for_signal/fork` do
+not exist yet.
 
-See [docs/database-design.md](docs/database-design.md) and
+See [docs/replay-and-recovery.md](docs/replay-and-recovery.md) (what each crash leaves behind and how
+resume handles it), [docs/database-design.md](docs/database-design.md) and
 [docs/workflow-lifecycle.md](docs/workflow-lifecycle.md).
+
+## Demo: crash and recovery
+
+```bash
+python scripts/demo_crash_recovery.py
+```
+
+Starts a run in a worker process, kills the process at a controlled point, shows what survived in
+PostgreSQL, resumes the run in a new process, and prints the final timeline: completed steps appear
+once because the second process reused their saved results.
 
 ## Getting started
 
@@ -116,8 +138,9 @@ curl localhost:8000/runs/<run_id>/events      # the recorded timeline
 ## Running the tests
 
 ```bash
-pytest                         # unit tests + integration tests
+pytest                         # everything
 pytest -m "not integration"    # unit tests only, no database needed
+pytest -m recovery             # crash/resume tests, including killed worker processes
 ```
 
 Integration tests use the database in `TEST_DATABASE_URL` (default

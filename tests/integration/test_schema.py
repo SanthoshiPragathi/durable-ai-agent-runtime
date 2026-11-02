@@ -128,4 +128,4 @@ def test_alembic_cli_runs_from_the_project_root(migrated_database: str) -> None:
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    assert "0001" in result.stdout + result.stderr
+    assert "(head)" in result.stdout + result.stderr
