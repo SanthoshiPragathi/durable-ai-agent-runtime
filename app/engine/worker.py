@@ -140,6 +140,7 @@ class Worker:
             )
         if row is None:
             return None
+        failpoint("after_lease_claimed")  # the lease is ours and committed; nothing recorded yet
         return Claim(
             run_id=row["run_id"],
             fence=Fence(self.worker_id, row["fencing_token"]),
@@ -154,7 +155,7 @@ class Worker:
     async def process(self, claim: Claim) -> WorkflowRun | None:
         """Execute a claimed run. Returns the final run row, or None if the lease was lost."""
         run_id, fence = claim.run_id, claim.fence
-        definition = registry.get(claim.workflow_name)
+        definition = registry.get(claim.workflow_name, claim.workflow_version)
         try:
             history = await self._begin(claim)
         except StaleLeaseError:
@@ -218,6 +219,7 @@ class Worker:
                     "in_doubt": history.count(StepStatus.IN_DOUBT),
                 },
             )
+            failpoint("during_recovery")  # WORKFLOW_RESUMED appended but the transaction not yet committed
             return history
 
     async def _keep_lease(self, run_id: uuid.UUID, fence: Fence, drive: asyncio.Task) -> bool:
@@ -235,6 +237,7 @@ class Worker:
         last_confirmed = time.monotonic()
         while True:
             await asyncio.sleep(self.heartbeat_seconds)
+            failpoint("before_heartbeat")  # kill: the lease lapses mid-run; stall: the heartbeat freezes
             try:
                 async with self.session_factory() as session, session.begin():
                     runs = RunRepository(session)

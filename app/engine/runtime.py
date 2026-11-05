@@ -31,6 +31,7 @@ from app.engine.errors import (
     RunNotFoundError,
     RunSuspendedError,
     StaleLeaseError,
+    WorkflowNotFoundError,
     WorkflowVersionMismatchError,
     format_error,
     is_infrastructure_error,
@@ -79,7 +80,7 @@ async def execute_run(
         run = await runs.get_run(run_id)
         if run is None:
             raise RunNotFoundError(f"run {run_id} does not exist")
-        definition = registry.get(run.workflow_name)
+        definition = registry.get(run.workflow_name, run.workflow_version)
         input_data = dict(run.input_data)
 
         # The PENDING check is inside the UPDATE, so a duplicate execute_run loses here.
@@ -117,12 +118,16 @@ async def resume_run(
                 f"run {run_id} is leased to worker {run.lease_owner!r}; resume_run() would race it. "
                 "Let a worker recover the run once its lease expires."
             )
-        definition = registry.get(run.workflow_name)
-        if definition.version != run.workflow_version:
+        try:
+            definition = registry.get(run.workflow_name, run.workflow_version)
+        except WorkflowNotFoundError:
+            registered = registry.versions(run.workflow_name)
+            if not registered:
+                raise
             raise WorkflowVersionMismatchError(
                 f"run {run_id} was started with {run.workflow_name!r} v{run.workflow_version} "
-                f"but v{definition.version} is registered"
-            )
+                f"but only {', '.join(f'v{v}' for v in registered)} is registered"
+            ) from None
 
         events = await EventRepository(session).list_events(run_id)
         history = ReplayHistory.from_events(events)

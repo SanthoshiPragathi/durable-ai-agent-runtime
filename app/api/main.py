@@ -11,7 +11,7 @@ import app.examples.refund_workflow  # noqa: F401  (importing registers the exam
 import app.examples.simple_workflow  # noqa: F401
 import app.examples.slow_workflow  # noqa: F401
 from app.api.auth import auth_enabled, require_api_key
-from app.api.routes import runs, services, workers, workflows
+from app.api.routes import metrics, runs, services, workers, workflows
 from app.engine.errors import (
     DurableRuntimeError,
     InvalidResolutionError,
@@ -34,6 +34,7 @@ app.include_router(workflows.router, dependencies=_protected)
 app.include_router(runs.router, dependencies=_protected)
 app.include_router(services.router, dependencies=_protected)
 app.include_router(workers.router, dependencies=_protected)
+app.include_router(metrics.router, dependencies=_protected)  # a read-only key is enough for Prometheus
 
 if not auth_enabled():
     logger.warning(

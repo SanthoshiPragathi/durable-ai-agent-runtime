@@ -95,3 +95,57 @@ def test_validate_input_rejects_non_json() -> None:
 
     with pytest.raises(StepSerializationError):
         registry.validate_input("refund", {"order_id": object()})
+
+
+# ---- several versions of one workflow side by side -------------------------------------------
+
+
+def test_versions_of_one_name_coexist_and_latest_is_the_default() -> None:
+    @workflow(name="pay", version=1)
+    async def pay_v1(ctx):
+        return 1
+
+    @workflow(name="pay", version=2)
+    async def pay_v2(ctx):
+        return 2
+
+    assert registry.versions("pay") == [1, 2]
+    assert registry.get("pay").fn is pay_v2  # new runs start on the latest version
+    assert registry.get("pay", 1).fn is pay_v1  # a run created on v1 keeps using v1
+    assert [(d.name, d.version) for d in registry.list()] == [("pay", 1), ("pay", 2)]
+
+
+def test_an_unregistered_version_is_reported_with_what_is_registered() -> None:
+    @workflow(name="pay", version=2)
+    async def pay_v2(ctx):
+        return 2
+
+    with pytest.raises(WorkflowNotFoundError, match=r"v1.*\[2\]"):
+        registry.get("pay", 1)
+
+
+def test_the_same_version_cannot_be_registered_by_two_different_functions() -> None:
+    @workflow(name="pay", version=2)
+    async def first(ctx):
+        return 1
+
+    with pytest.raises(WorkflowAlreadyRegisteredError, match="v2"):
+
+        @workflow(name="pay", version=2)
+        async def second(ctx):
+            return 2
+
+
+def test_input_is_validated_against_the_requested_version() -> None:
+    @workflow(name="pay", version=1)
+    async def pay_v1(ctx, order_id: str):
+        return 1
+
+    @workflow(name="pay", version=2)
+    async def pay_v2(ctx, order_id: str, amount: int):
+        return 2
+
+    registry.validate_input("pay", {"order_id": "A", "amount": 5})  # latest = v2
+    registry.validate_input("pay", {"order_id": "A"}, version=1)
+    with pytest.raises(InvalidWorkflowInputError):
+        registry.validate_input("pay", {"order_id": "A"})  # v2 needs amount

@@ -8,6 +8,8 @@ on the same setup):
   2. Cost per step of a live run, and the cost of replaying a history of 10 / 100 / 500 steps.
   3. Claim latency (p50 / p99) with 1000 pending runs.
   4. Recovery time after a worker dies mid-run (lease 1.5 s).
+  5. Durability overhead: the same workflow as plain Python vs through the runtime, with p50 / p99 of
+     the per-step time (STEP_STARTED to STEP_COMPLETED, read from the event log).
 
 Needs PostgreSQL running and migrated. It truncates the runtime tables first (use a dev database).
 """
@@ -125,6 +127,57 @@ async def recovery_time(sf) -> float:
     return elapsed
 
 
+class PlainContext:
+    """Runs a workflow body with no durability at all: ctx.step just calls the function."""
+
+    async def step(self, name, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+
+def percentile(sorted_values: list[float], q: float) -> float:
+    return sorted_values[min(len(sorted_values) - 1, max(0, round(q * len(sorted_values)) - 1))]
+
+
+async def durability_overhead(sf, steps: int = 20, runs: int = 60) -> dict[str, float]:
+    """Plain Python vs the same workflow through the runtime (in process, one run at a time)."""
+    await reset(sf)
+    body = registry.get("bench_flow").fn
+
+    plain_ms = []
+    for _ in range(runs * 20):  # plain runs are microseconds; repeat so the clock can see them
+        t = time.perf_counter()
+        await body(PlainContext(), steps=steps)
+        plain_ms.append((time.perf_counter() - t) * 1000)
+
+    durable_ms = []
+    for _ in range(runs):
+        run = await runtime.create_run(sf, "bench_flow", {"steps": steps})
+        t = time.perf_counter()
+        await runtime.execute_run(sf, run.run_id)
+        durable_ms.append((time.perf_counter() - t) * 1000)
+
+    async with sf() as session:
+        rows = (await session.execute(text(
+            """
+            SELECT EXTRACT(EPOCH FROM (c.created_at - s.created_at)) * 1000
+            FROM workflow_events c
+            JOIN workflow_events s ON s.run_id = c.run_id AND s.step_name = c.step_name
+                 AND s.event_type = 'STEP_STARTED'
+            WHERE c.event_type = 'STEP_COMPLETED'
+            """
+        ))).all()
+    step_ms = sorted(float(r[0]) for r in rows)
+    plain_per_step = statistics.median(plain_ms) / steps
+    durable_per_step = statistics.median(durable_ms) / steps
+    return {
+        "steps": steps, "plain_per_step_ms": plain_per_step, "durable_per_step_ms": durable_per_step,
+        "overhead_per_step_ms": durable_per_step - plain_per_step,
+        "step_p50_ms": percentile(step_ms, 0.5), "step_p99_ms": percentile(step_ms, 0.99),
+        "run_p50_ms": statistics.median(durable_ms), "run_p99_ms": percentile(sorted(durable_ms), 0.99),
+        "samples": len(step_ms),
+    }
+
+
 async def main() -> None:
     load_workflow_modules()
     assert registry.get("bench_flow")
@@ -142,6 +195,17 @@ async def main() -> None:
             print(f"| {steps} | {live:.1f} | {replay:.0f} |")
         p50, p99 = await claim_latency(sf)
         print(f"\n## Claim latency (1000 pending runs)\n\np50 {p50:.1f} ms, p99 {p99:.1f} ms")
+        o = await durability_overhead(sf)
+        print(f"\n## Durability overhead ({o['steps']}-step workflow, in-process, "
+              f"{o['samples']} steps measured)\n")
+        print("| | per step |\n|---|---|")
+        print(f"| plain Python (no durability) | {o['plain_per_step_ms'] * 1000:.1f} us |")
+        print(f"| through the runtime (median run / steps) | {o['durable_per_step_ms']:.2f} ms |")
+        print(f"| overhead added by durability | {o['overhead_per_step_ms']:.2f} ms |")
+        print(f"| step time STEP_STARTED to STEP_COMPLETED, p50 / p99 | "
+              f"{o['step_p50_ms']:.2f} / {o['step_p99_ms']:.2f} ms |")
+        print(f"| whole {o['steps']}-step run, p50 / p99 | "
+              f"{o['run_p50_ms']:.0f} / {o['run_p99_ms']:.0f} ms |")
         rec = await recovery_time(sf)
         print(f"\n## Recovery after a worker dies mid-run (lease 1.5 s)\n\n"
               f"{rec:.1f} s from the crash to the run COMPLETED by a new worker "

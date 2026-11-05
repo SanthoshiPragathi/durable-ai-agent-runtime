@@ -285,3 +285,74 @@ async def test_an_idle_worker_backs_off_and_throttles_its_heartbeat_writes(
     # Polling every 0.05 s for 1.5 s would be about 30 polls and 30 heartbeat writes.
     assert 3 <= worker.polls < 22
     assert 1 <= worker.touches <= 4
+
+
+# ---- shipping v2 while v1 runs are still waiting ----------------------------------------------
+
+
+def register_both_versions(calls: list[str]) -> None:
+    @workflow(name="approval_v", version=1)
+    async def approval_v1(ctx):
+        await ctx.step("before", lambda: calls.append("v1-before") or 1)
+        answer = await ctx.wait_for_signal("wait", signal="decision")
+        await ctx.step("after", lambda: calls.append("v1-after") or 2)
+        return {"version": 1, "answer": answer["payload"]}
+
+    @workflow(name="approval_v", version=2)
+    async def approval_v2(ctx):
+        await ctx.step("before", lambda: calls.append("v2-before") or 1)
+        answer = await ctx.wait_for_signal("wait", signal="decision")
+        await ctx.step("after", lambda: calls.append("v2-after") or 2)
+        await ctx.step("audit", lambda: calls.append("v2-audit") or 3)  # v2 adds a step
+        return {"version": 2, "answer": answer["payload"]}
+
+
+async def test_a_waiting_v1_run_finishes_on_v1_code_while_new_runs_use_v2(
+    session_factory: SessionFactory,
+) -> None:
+    calls: list[str] = []
+    register_both_versions(calls)
+
+    old = await runtime.create_run(session_factory, "approval_v", {})  # latest is v2 ...
+    assert old.workflow_version == 2
+
+    # ... so make a genuine v1 run the way it would exist from before the deploy.
+    async with session_factory() as session, session.begin():
+        repo = RunRepository(session)
+        await repo.ensure_workflow("approval_v", 1)
+        v1 = await repo.create_run("approval_v", 1, {})
+    v2 = old
+
+    worker = make_worker(session_factory)
+    assert await worker.run_until_idle() == 2  # both park at their wait
+    for run_id in (v1.run_id, v2.run_id):
+        await send_signal(session_factory, run_id, "decision", {"ok": True})
+    assert await make_worker(session_factory, "w2").run_until_idle() == 2
+
+    assert (await run_of(session_factory, v1.run_id)).result_data == {"version": 1, "answer": {"ok": True}}
+    assert (await run_of(session_factory, v2.run_id)).result_data == {"version": 2, "answer": {"ok": True}}
+    assert "v1-audit" not in calls and calls.count("v2-audit") == 1  # each ran its own code, once
+
+
+async def test_a_worker_without_v1_code_leaves_v1_runs_for_a_worker_that_has_it(
+    session_factory: SessionFactory,
+) -> None:
+    calls: list[str] = []
+    register_both_versions(calls)
+    async with session_factory() as session, session.begin():
+        repo = RunRepository(session)
+        await repo.ensure_workflow("approval_v", 1)
+        v1 = await repo.create_run("approval_v", 1, {})
+
+    from app.sdk.workflow import registry
+
+    both = registry.snapshot()
+    registry.clear()
+    only_v2 = {k: d for k, d in both.items() if k[1] == 2}
+    registry.restore(only_v2)
+    assert await make_worker(session_factory, "new-code").run_until_idle() == 0  # skipped, not failed
+    assert (await run_of(session_factory, v1.run_id)).status == "PENDING"
+
+    registry.restore(both)
+    assert await make_worker(session_factory, "old-code").run_until_idle() == 1
+    assert (await run_of(session_factory, v1.run_id)).status == "WAITING"

@@ -220,3 +220,29 @@ async def test_idempotency_status_must_be_known(session_factory: SessionFactory)
                 ),
                 {"r": run_id},
             )
+
+
+async def test_creating_the_first_runs_of_a_new_workflow_concurrently_does_not_collide(
+    session_factory: SessionFactory,
+) -> None:
+    """Regression (found by the chaos campaign): ensure_workflow used to read-then-insert, so a burst of
+    simultaneous create_run calls for a workflow nobody had run yet failed with a duplicate key."""
+    import asyncio
+
+    from app.engine import runtime
+    from app.sdk import workflow
+    from app.sdk.workflow import registry
+
+    saved = registry.snapshot()
+    try:
+
+        @workflow(name="fresh_concurrent_flow")
+        async def fresh_concurrent_flow(ctx):
+            return 1
+
+        runs = await asyncio.gather(
+            *(runtime.create_run(session_factory, "fresh_concurrent_flow", {}) for _ in range(25))
+        )
+        assert len({r.run_id for r in runs}) == 25
+    finally:
+        registry.restore(saved)

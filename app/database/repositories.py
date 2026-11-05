@@ -76,11 +76,15 @@ class RunRepository:
         self._session = session
 
     async def ensure_workflow(self, name: str, version: int) -> None:
-        """Register (name, version) if it is not already known."""
-        existing = await self._session.get(Workflow, (name, version))
-        if existing is None:
-            self._session.add(Workflow(name=name, version=version))
-            await self._session.flush()
+        """Register (name, version) if it is not already known.
+
+        A single INSERT ... ON CONFLICT DO NOTHING, not "look it up, then insert": two requests that
+        create the first runs of a new workflow at the same moment would both find nothing, and the
+        second insert would fail with a duplicate key (found by the chaos campaign).
+        """
+        await self._session.execute(
+            pg_insert(Workflow).values(name=name, version=version).on_conflict_do_nothing()
+        )
 
     async def create_run(
         self,

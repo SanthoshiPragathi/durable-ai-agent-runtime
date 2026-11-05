@@ -39,3 +39,21 @@ Recovery time is dominated by the lease length: a shorter lease recovers faster 
 
 Real network latency to a remote database, many thousands of concurrent runs, large payloads, or LLM latency.
 Each live step is two commits, so throughput per worker is bounded by database commit latency.
+
+
+## Update: durability overhead and latency (Linux, 2 cores, local PostgreSQL 16)
+
+Measured with `python scripts/benchmark.py`; absolute numbers depend on hardware, treat as relative.
+
+| Measurement | Result |
+|---|---|
+| Throughput, 1 / 2 / 4 workers | 9.8 / 22.8 / 20.3 runs/s (118 / 274 / 244 events/s) |
+| Live step latency, 10 / 100 / 500-step runs | 20.6 / 15.7 / 14.7 ms |
+| Resume (replay) time, 10 / 100 / 500 steps | 49 / 45 / 54 ms |
+| Claim latency | p50 2.0 ms, p99 3.9 ms |
+| Plain Python step vs durable step (20-step workflow) | 0.4 us vs 11.17 ms per step |
+| Step STARTED to COMPLETED | p50 5.42 ms, p99 9.22 ms |
+| Whole 20-step run | p50 223 ms, p99 262 ms |
+| Crash recovery | 1.6 s |
+
+The ~11 ms per step is the price of committing events to PostgreSQL before moving on. Throughput stopped scaling at 4 workers on 2 cores, so that point is CPU-bound in this sandbox, not a measured limit of the design. No comparison against Temporal or Restate was run.

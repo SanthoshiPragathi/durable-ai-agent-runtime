@@ -1,0 +1,12 @@
+# Scrapes the runtime's /metrics. If API authentication is on, a READ-ONLY key is enough.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: durable-runtime
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]        # use "host.docker.internal:8000" for an API running outside Docker
+    # authorization:                 # uncomment when API_OPERATOR_KEYS / API_READONLY_KEYS are set
+    #   type: Bearer
+    #   credentials: <a read-only key>

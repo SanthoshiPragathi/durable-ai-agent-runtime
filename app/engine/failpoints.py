@@ -26,6 +26,12 @@ Names used so far:
     before_wait_recorded          key=step name, a sleep/signal wait is about to be evaluated
     after_wait_recorded           key=step name, the wait was recorded (completed, or run parked)
     before_workflow_completed     all steps done, WORKFLOW_COMPLETED not yet recorded
+    after_lease_claimed           worker.claim_one: the lease is committed, nothing recorded yet
+                                  (a kill here is a worker dying during a takeover)
+    during_recovery               worker._begin: WORKFLOW_RESUMED appended but not committed
+                                  (a kill here is a worker dying while it recovers a run)
+    before_heartbeat              worker._keep_lease: a heartbeat is due, not yet sent
+                                  (kill: the lease lapses mid-run; stall: the heartbeat freezes)
 """
 
 import os

@@ -219,7 +219,7 @@ def test_the_property_test_has_teeth_a_plain_step_does_duplicate(
             async def naive_flow(ctx):
                 return await ctx.step("pay", crash.wrap("pay", service.refund), "o0", 100)
 
-            name = next(iter(registry.snapshot()))
+            name = next(iter(registry.snapshot()))[0]
             run_id = (await runtime.create_run(sf, name, {})).run_id
             with pytest.raises(SimulatedCrash):
                 await runtime.execute_run(sf, run_id)
