@@ -2,7 +2,7 @@
 
 A fault-tolerant execution engine for AI workflows: crash-safe, replayable, and forkable.
 
-> **Status: Phase 7 (chaos tests and benchmarks).** Workflows run, every step is recorded in PostgreSQL, a
+> **Status: complete (Phases 0-8).** Workflows run, every step is recorded in PostgreSQL, a
 > crashed run resumes from its history, calls with real-world effects (payments, emails) are protected against
 > duplicates where the external system allows it, and several worker processes share the work: a dead worker's
 > runs are taken over automatically and a frozen "zombie" worker cannot write to a run it lost. Timers,
@@ -44,7 +44,7 @@ It does *not* claim universal exactly-once execution, which is impossible in gen
 | 5 | Durable timers and signals | done |
 | 6 | Forking and run diff | done |
 | 7 | Failure injection, chaos tests, benchmarks | done |
-| 8 | Dashboard and documentation | todo |
+| 8 | Dashboard and documentation | done |
 
 ## Tech stack
 
@@ -67,7 +67,7 @@ docs/             design documents
 scripts/          helper scripts
 ```
 
-## What works today (Phase 7)
+## What works today (final)
 
 ```python
 from app.sdk import workflow
@@ -121,11 +121,19 @@ Idempotency keys are per run and step, so two separate runs for the same order a
 cannot recall an external call a stale worker already started. A run executed directly with
 `execute_run`/`resume_run` (not by a worker) is not recovered automatically. One run at a time per worker process.
 
+Start with [docs/architecture.md](docs/architecture.md); for interviews see
+[docs/interview-guide.md](docs/interview-guide.md) and [docs/demo-script.md](docs/demo-script.md).
 See [docs/forking-and-diff.md](docs/forking-and-diff.md), [docs/timers-and-signals.md](docs/timers-and-signals.md) (waits, wakeups, why none is lost),
 [docs/workers-and-leases.md](docs/workers-and-leases.md) (claiming, leases, fencing, failure table),
 [docs/idempotency.md](docs/idempotency.md) (decision table, review path, what is and is not protected,
 the bug the property test found), [docs/replay-and-recovery.md](docs/replay-and-recovery.md),
 [docs/database-design.md](docs/database-design.md) and [docs/workflow-lifecycle.md](docs/workflow-lifecycle.md).
+
+## Dashboard
+
+Start the API and open `http://localhost:8000/dashboard`: runs, workers, each run's event timeline, timers,
+signals, external operations, plus buttons to send a signal, fork from a step and diff two runs. It is one HTML
+file with plain JavaScript (no build step, no Node needed).
 
 ## Demos
 

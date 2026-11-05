@@ -16,7 +16,7 @@ Only results that were actually observed are listed here. Re-run them yourself w
 
 | Suite | Command | Tests | Result |
 |---|---|---|---|
-| Everything | `pytest` (with `PG_RESTART_CMD` set) | 316 | **316 passed** (4 min 42 s on Linux) |
+| Everything | `pytest` (with `PG_RESTART_CMD` set) | 317 | **317 passed** (5 min 38 s on Linux) |
 | Unit (no database) | `pytest -m "not integration"` | 91 | passed |
 | Integration (PostgreSQL) | `pytest -m integration` | 186 | passed |
 | of which crash/resume (`recovery`) | `pytest -m recovery` | 80 | passed |
