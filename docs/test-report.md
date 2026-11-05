@@ -1,4 +1,4 @@
-# Test report (through Phase 5)
+# Test report (through Phase 7)
 
 Only results that were actually observed are listed here. Re-run them yourself with the commands at the end.
 
@@ -16,7 +16,7 @@ Only results that were actually observed are listed here. Re-run them yourself w
 
 | Suite | Command | Tests | Result |
 |---|---|---|---|
-| Everything | `pytest` | 313 | **313 passed** (3 min 35 s on Linux) |
+| Everything | `pytest` (with `PG_RESTART_CMD` set) | 316 | **316 passed** (4 min 42 s on Linux) |
 | Unit (no database) | `pytest -m "not integration"` | 91 | passed |
 | Integration (PostgreSQL) | `pytest -m integration` | 186 | passed |
 | of which crash/resume (`recovery`) | `pytest -m recovery` | 80 | passed |
@@ -27,6 +27,17 @@ Only results that were actually observed are listed here. Re-run them yourself w
 | Lint | `ruff check .` | | clean |
 
 (Markers overlap: recovery, concurrency and chaos tests are also integration tests.)
+
+## What the Phase 7 tests prove (3 new tests, plus a worker/runtime change)
+
+| Claim | Test |
+|---|---|
+| Outage windows (4222 statements rejected over 4 seeds) and 39 lost acknowledgements: no run failed, one refund and one email per run, valid histories | `tests/chaos/test_db_outage.py` |
+| PostgreSQL really restarted under 3 worker processes: all workers exit 0, 12/12 runs complete, one refund and one email each | `tests/chaos/test_postgres_restart.py` (runs only when `PG_RESTART_CMD` is set) |
+| 4 seeds of duplicate signals (1-4 concurrent copies), signals never sent, short timeouts and extra timer firers: 48 waits received, 24 timed out, none double-consumed | `tests/chaos/test_signal_timer_storm.py` |
+
+Three mutation checks were caught (infrastructure error recorded as failure; worker loop not surviving; signal
+dedupe removed). Benchmarks: [benchmarks.md](benchmarks.md). Phase 6 on Windows: 313 tests and all six demos passed.
 
 ## What the Phase 5 tests prove (29 new tests)
 
@@ -89,7 +100,7 @@ The "world" column is read from the fake services' own ledger, a separate databa
 | 16 | Same, with a verify hook | same | verify finds the refund, step `RECONCILED` | 1 → 1 | **Prevented** by reconciliation |
 | 17 | Plain `ctx.step` around a payment (the wrong way) | `STEP_STARTED` | step runs again | 1 → **2** | **Yes**: shown on purpose; use `ctx.effect` |
 
-Not yet tested (Phase 7): PostgreSQL unavailable or restarted mid-run. Claiming a run twice, stale workers,
+Claiming a run twice, stale workers,
 duplicate signals and duplicate timers are covered above.
 
 ## A bug the tests found
