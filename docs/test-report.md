@@ -103,6 +103,15 @@ The "world" column is read from the fake services' own ledger, a separate databa
 Claiming a run twice, stale workers,
 duplicate signals and duplicate timers are covered above.
 
+## A test flaw found on Windows (Phase 8 run)
+
+The first Windows run of the full suite had 316 passed and 1 failed: `test_db_outage.py` timed out after 120 s.
+The runtime was fine; the test applied outage windows for as long as the run lasted, and on a slower machine
+the runs never got enough clear time to finish. The outages are now limited to the first 8 seconds of each seed
+and the overall timeout is 300 s. The same run's benchmarks on Windows/Docker: 8.7, 16.2 and 22.7 runs/s with
+1, 2 and 4 workers; replay of 500 steps 63 ms; recovery 1.6 s (claim p50 shows 0.0 ms because the Windows timer
+is coarser than the claim).
+
 ## A bug the tests found
 
 The randomized test found a real duplicate-refund bug in the first Phase 3 implementation (a reviewer's

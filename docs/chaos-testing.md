@@ -7,7 +7,7 @@ does not rely on the runtime's own bookkeeping: the fake payment/email ledgers l
 |---|---|---|---|
 | `tests/chaos/test_lease_chaos.py` | leases forced to expire under live workers (false failure detection) | ledgers + event-log invariants | takeovers and stale workers never duplicate an effect |
 | `tests/chaos/test_property_effects.py` | random crash/retry patterns (Hypothesis) | ledgers | idempotent effects are never repeated |
-| `tests/chaos/test_db_outage.py` | the runtime database refuses every statement for 50-400 ms windows, and 8% of recorder writes commit but report failure (lost ack) | ledgers + history invariants | an outage is never recorded as a failed run; nothing is duplicated; every run completes |
+| `tests/chaos/test_db_outage.py` | the runtime database refuses every statement for 50-400 ms windows during the first 8 s of each seed (then calm, so a slow machine can finish), and 8% of recorder writes commit but report failure (lost ack) | ledgers + history invariants | an outage is never recorded as a failed run; nothing is duplicated; every run completes |
 | `tests/chaos/test_postgres_restart.py` | PostgreSQL really restarted (`PG_RESTART_CMD`) under 3 worker processes | ledgers + history | workers survive the restart, every run completes with one refund and one email |
 | `tests/chaos/test_signal_timer_storm.py` | every signal delivered 1-4 times concurrently, some never sent, short timeouts, extra timer firers | stored signals + step results | a signal is consumed at most once; timeouts and signals never both win a wait |
 | `tests/recovery/test_process_*` | real processes killed at exact points (failpoints) | ledgers + history | each crash window recovers (Phases 2-5) |
