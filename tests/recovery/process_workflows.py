@@ -68,3 +68,26 @@ async def waiting_pipeline(ctx, order_id: str):
     refund = await ctx.step("process_refund", process_refund, order["amount"])
     await ctx.step("send_email", send_email, refund["refund_id"])
     return {"order_id": order_id, "payload": answer["payload"]}
+
+
+@workflow(name="slow_refund")
+async def slow_refund(ctx, order_id: str):
+    """Several slow steps and two real effects against the fake services' ledgers, so a database
+    restart lands in the middle of runs. Used by tests/chaos/test_postgres_restart.py."""
+    import asyncio
+
+    from app.integrations.tools import emails, payments
+
+    async def think(label: str) -> str:
+        await asyncio.sleep(0.25)
+        return label
+
+    await ctx.step("look_up", think, "look_up")
+    await ctx.step("check", think, "check")
+    refund = await ctx.effect("process_refund", payments().refund, order_id, 2500, idempotent=True)
+    await ctx.step("review", think, "review")
+    await ctx.effect(
+        "send_confirmation", emails().send, "a@example.com", f"refund {order_id}", "done", idempotent=True
+    )
+    await ctx.step("wrap_up", think, "wrap_up")
+    return {"order_id": order_id, "refund_id": refund["refund_id"]}
