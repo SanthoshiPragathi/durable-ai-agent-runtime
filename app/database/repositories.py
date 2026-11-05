@@ -36,6 +36,8 @@ def _seconds(value: float):
     return func.make_interval(0, 0, 0, 0, 0, 0, value)
 
 
+DRAIN_TIMER_HORIZON_SECONDS = 60.0
+
 _NO_LEASE = {"lease_owner": None, "lease_expires_at": None}
 
 # Claim one run: a never-started run, or a RUNNING run whose lease lapsed (its worker died or
@@ -215,8 +217,9 @@ class RunRepository:
 
     async def count_unfinished(self) -> int:
         """Work a draining worker should still wait for: PENDING or RUNNING runs, plus timers that
-        have not fired (a sleeping run will need a worker once its timer is due). Runs waiting for a
-        signal or a reviewer are not counted: no worker can advance them."""
+        will be due within DRAIN_TIMER_HORIZON_SECONDS (a sleeping run will need a worker soon). Runs
+        waiting for a signal, a reviewer or a far-away timer (a 3 day timeout) are not counted: a
+        draining worker cannot sensibly wait for them, and must not hang on an unrelated waiting run."""
         runs = await self._session.execute(
             select(func.count())
             .select_from(WorkflowRun)
@@ -228,6 +231,7 @@ class RunRepository:
             .join(WorkflowRun, WorkflowRun.run_id == WorkflowTimer.run_id)
             .where(
                 WorkflowTimer.status == TimerStatus.PENDING.value,
+                WorkflowTimer.fire_at <= func.now() + _seconds(DRAIN_TIMER_HORIZON_SECONDS),
                 WorkflowRun.status == RunStatus.WAITING.value,
             )
         )
