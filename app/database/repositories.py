@@ -305,6 +305,18 @@ class RunRepository:
         Releases the lease: nobody executes a run that is waiting for a person."""
         await self._transition(run_id, RunStatus.RUNNING, RunStatus.NEEDS_REVIEW, **_NO_LEASE)
 
+    async def start_claimable(self, run_id: uuid.UUID) -> None:
+        """PENDING -> RUNNING with no owner and an already expired lease: a run whose history was
+        seeded (a fork) and that any worker may claim, replaying that history."""
+        await self._transition(
+            run_id,
+            RunStatus.PENDING,
+            RunStatus.RUNNING,
+            started_at=func.now(),
+            lease_owner=None,
+            lease_expires_at=func.now() - _seconds(1),
+        )
+
     async def reopen(self, run_id: uuid.UUID, *, claimable: bool = False) -> None:
         """NEEDS_REVIEW -> RUNNING, after a person resolved the unknown step.
 
