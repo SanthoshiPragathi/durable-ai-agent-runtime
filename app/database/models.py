@@ -1,8 +1,8 @@
 """SQLAlchemy models. PostgreSQL is the durable source of truth for execution history.
 
-Phase 1 tables: workflows, workflow_runs, workflow_events.
-worker_leases, workflow_timers, workflow_signals and idempotency_records arrive in the
-phases that need them, each with its own migration.
+Tables: workflows, workflow_runs, workflow_events (Phase 1), idempotency_records (Phase 3),
+workers plus the lease columns on workflow_runs (Phase 4). workflow_timers and workflow_signals
+arrive in Phase 5, each with its own migration.
 """
 
 import enum
@@ -86,12 +86,12 @@ class Workflow(Base):
 class WorkflowRun(Base):
     __tablename__ = "workflow_runs"
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["workflow_name", "workflow_version"], ["workflows.name", "workflows.version"]
-        ),
+        ForeignKeyConstraint(["workflow_name", "workflow_version"], ["workflows.name", "workflows.version"]),
         CheckConstraint(f"status IN ({_sql_list(RunStatus)})", name="ck_workflow_runs_status"),
         Index("ix_workflow_runs_status", "status"),
         Index("ix_workflow_runs_created_at", "created_at"),
+        # Serves the worker's "find a claimable run" query.
+        Index("ix_workflow_runs_claim", "status", "lease_expires_at", "created_at"),
     )
 
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -111,6 +111,37 @@ class WorkflowRun(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Phase 4: who may execute this run right now.
+    #   lease_owner       worker holding the lease (NULL: nobody; also NULL for runs executed
+    #                     directly by execute_run()/resume_run(), which workers never touch)
+    #   lease_expires_at  when the lease lapses unless the owner renews it (database clock)
+    #   fencing_token     +1 on every claim. Every write by a worker must carry the token it was
+    #                     given; a write carrying an older token is rejected (StaleLeaseError).
+    lease_owner: Mapped[str | None] = mapped_column(String(100))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fencing_token: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
+
+
+class Worker(Base):
+    """A worker process, for visibility only. Correctness never depends on this table: whether a
+    run may be executed is decided by the lease on the run row."""
+
+    __tablename__ = "workers"
+    __table_args__ = (CheckConstraint("status IN ('ACTIVE', 'STOPPED')", name="ck_workers_status"),)
+
+    worker_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(200), nullable=False)
+    pid: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="ACTIVE")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class WorkflowEvent(Base):
@@ -154,9 +185,7 @@ class IdempotencyRecord(Base):
 
     __tablename__ = "idempotency_records"
     __table_args__ = (
-        CheckConstraint(
-            f"status IN ({_sql_list(IdempotencyStatus)})", name="ck_idempotency_records_status"
-        ),
+        CheckConstraint(f"status IN ({_sql_list(IdempotencyStatus)})", name="ck_idempotency_records_status"),
         Index("ix_idempotency_records_run_id", "run_id"),
     )
 
