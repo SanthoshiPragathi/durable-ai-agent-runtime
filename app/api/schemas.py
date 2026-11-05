@@ -26,6 +26,21 @@ class RunOut(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    fencing_token: int = 0
+
+
+class WorkerOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    worker_id: str
+    hostname: str
+    pid: int
+    status: str
+    started_at: datetime
+    last_heartbeat_at: datetime
+    alive: bool = Field(description="ACTIVE and heard from within one lease period")
 
 
 class EventOut(BaseModel):

@@ -4,6 +4,7 @@ No secrets are hardcoded here. Defaults are safe for local development only.
 """
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,6 +16,10 @@ class Settings(BaseSettings):
     services_database_url: str = (
         "postgresql+asyncpg://durable:durable@localhost:5432/fake_services"
     )
+
+    # "inline": the API process executes runs itself (single process, simplest to try out).
+    # "workers": the API only records runs; worker processes (python -m app.engine.worker) execute them.
+    execution_mode: Literal["inline", "workers"] = "inline"
 
     # A worker must renew its lease more often than it expires.
     lease_duration_seconds: float = 15.0

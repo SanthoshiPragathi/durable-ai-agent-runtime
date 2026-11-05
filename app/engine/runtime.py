@@ -199,6 +199,7 @@ async def resolve_unknown_step(
         await runs.reopen(run_id, claimable=make_claimable)
         reopened = await runs.get_run(run_id)
         assert reopened is not None
+        await session.refresh(reopened)  # the UPDATE used SQL expressions; reload before the session closes
     return reopened
 
 

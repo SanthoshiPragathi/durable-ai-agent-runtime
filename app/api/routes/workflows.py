@@ -5,6 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends
 
 from app.api.deps import get_session_factory
 from app.api.schemas import CreateRunRequest, ErrorOut, RunOut, WorkflowOut
+from app.config import get_settings
 from app.database.session import SessionFactory
 from app.engine import runtime
 from app.sdk.workflow import registry
@@ -19,7 +20,7 @@ async def list_workflows() -> list[WorkflowOut]:
 
 
 async def _execute_in_background(session_factory: SessionFactory, run_id: uuid.UUID) -> None:
-    # TEMPORARY (Phase 1): runs inside the API process. Phase 4 replaces this with worker processes.
+    # EXECUTION_MODE=inline only. With EXECUTION_MODE=workers the API just records the run.
     try:
         await runtime.execute_run(session_factory, run_id)
     except Exception:
@@ -40,5 +41,6 @@ async def start_run(
     session_factory: SessionFactory = Depends(get_session_factory),
 ) -> RunOut:
     run = await runtime.create_run(session_factory, workflow_name, body.input)
-    background_tasks.add_task(_execute_in_background, session_factory, run.run_id)
+    if get_settings().execution_mode == "inline":
+        background_tasks.add_task(_execute_in_background, session_factory, run.run_id)
     return RunOut.model_validate(run)
