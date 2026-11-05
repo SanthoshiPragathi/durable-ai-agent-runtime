@@ -10,17 +10,17 @@ Only results that were actually observed are listed here. Re-run them yourself w
 | Python | 3.13.18 |
 | PostgreSQL | 16.15 (UTF-8) |
 | Key packages | pytest 9.2.0, Hypothesis 6.170.14, SQLAlchemy 2.1.6, asyncpg 0.32.0 |
-| Also confirmed by the author | Phases 1, 2 and 3 (64, 121 and 229 tests) pass on Windows, Python 3.12.6, PostgreSQL 16 in Docker (Phase 3: 229 passed in about 3-4 minutes there). Phase 4 on Windows: not yet recorded here. |
+| Also confirmed by the author | Phases 1, 2 and 3 (64, 121 and 229 tests) pass on Windows, Python 3.12.6, PostgreSQL 16 in Docker (Phase 3: 229 passed in about 3-4 minutes there). Phase 4 on Windows: first run (275 tests) had 2 failures, both explained below and fixed; the rerun is not yet recorded here. |
 
 ## Results
 
 | Suite | Command | Tests | Result |
 |---|---|---|---|
-| Everything | `pytest` | 275 | **275 passed** (3 min 16 s) |
+| Everything | `pytest` | 277 | **277 passed** (about 3 min 15 s) |
 | Unit (no database) | `pytest -m "not integration"` | 91 | passed |
-| Integration (PostgreSQL) | `pytest -m integration` | 184 | passed |
+| Integration (PostgreSQL) | `pytest -m integration` | 186 | passed |
 | of which crash/resume (`recovery`) | `pytest -m recovery` | 80 | passed |
-| of which multi-worker (`concurrency`) | `pytest -m concurrency` | 40 | passed |
+| of which multi-worker (`concurrency`) | `pytest -m concurrency` | 42 | passed |
 | of which randomized (`chaos`) | `pytest -m chaos` | 3 | passed |
 | Property test, extended run (Phase 3) | `CHAOS_EXAMPLES=400 pytest -m chaos -k no_crash_pattern` | 400 random scenarios | **passed** (3 min 41 s) |
 | Lease chaos, extended run (Phase 4) | `CHAOS_SEEDS=30 pytest tests/chaos/test_lease_chaos.py -s` | 30 random schedules | **passed** (2 min 14 s): 984 leases force-expired, 333 takeovers, 398 stale workers stood down, no duplicate refund or email |
@@ -90,6 +90,26 @@ once, one refund) but the timeline lied about how it began. The worker now decid
 the history itself; a regression test fails without the fix. (An earlier failure of the same test was a flaw in
 the test, not the runtime: its lease-breaking UPDATE could touch a run that had just completed. Fixed in the test.)
 
+### Found by running Phase 4 on Windows
+
+The first Windows run (Python 3.12.6, 275 tests) failed two tests that had passed on Linux every time.
+
+1. **A real race in the worker (fixed).** When a run finishes, the completion transaction clears its lease.
+   A heartbeat firing just after that is refused, and the worker took a refused renewal to mean "someone
+   took my run": it cancelled the tail end of its own execution and counted a lost lease, although the run
+   had completed correctly. It needs a heartbeat to land in the few milliseconds between the completion
+   commit and the worker noticing, which database calls on that machine were slow enough to allow. The
+   worker now checks whether the lease was released by itself (same token, no owner) before treating a
+   refused renewal as a loss. Two regression tests: one fails without the fix, the other checks that a real
+   takeover is still detected.
+2. **A race in a test (fixed).** `test_a_zombie_stands_down_when_its_heartbeat_finds_the_lease_gone` expired the
+   lease and claimed it in two separate transactions; w1's heartbeat (every 0.1 s) is allowed to renew an
+   expired-but-unclaimed lease and sometimes did so in between. Expiring and claiming now happen in one
+   transaction.
+
+Lesson recorded: Linux passing is necessary but not enough for timing-sensitive code; the Windows run found
+a real defect.
+
 ## Checks that the tests can fail
 
 Mutation checks (change the code, confirm the tests catch it, restore it):
@@ -108,6 +128,7 @@ Mutation checks (change the code, confirm the tests catch it, restore it):
 | Claim without `SKIP LOCKED` | the locked-row test fails |
 | Do not increment the fencing token on claim | claim test fails |
 | Decide STARTED/RESUMED from the claim instead of the history | the regression test fails |
+| Treat any refused heartbeat as a lost lease (the original code) | the new heartbeat-after-completion test fails |
 
 ## Re-run
 
