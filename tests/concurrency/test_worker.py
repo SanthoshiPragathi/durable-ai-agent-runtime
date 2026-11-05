@@ -256,8 +256,13 @@ async def test_a_zombie_stands_down_when_its_heartbeat_finds_the_lease_gone(
     await asyncio.wait_for(entered.wait(), timeout=5)
 
     # Someone else takes the lease; w1's next heartbeat must notice and cancel the execution.
-    await _expire(session_factory, run.run_id)
+    # Expiring and claiming happen in ONE transaction: w1's heartbeat (every 0.1 s) is allowed to
+    # renew an expired-but-unclaimed lease, so a separate expire step could be undone by it first.
     async with session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE workflow_runs SET lease_expires_at = now() - interval '1 second' WHERE run_id=:r"),
+            {"r": run.run_id},
+        )
         claim = await RunRepository(session).claim_next(
             "w2", lease_seconds=30, workflows=[("hb_target", 1)]
         )
@@ -394,3 +399,54 @@ async def test_a_run_taken_over_before_anything_was_written_is_started_not_resum
     assert events[0].result_data == {"worker_id": "w2", "fencing_token": 2}
     assert "WORKFLOW_RESUMED" not in [e.event_type for e in events]
     assert (await _run(session_factory, run.run_id)).status == "COMPLETED"
+
+
+async def test_a_heartbeat_that_fires_after_normal_completion_does_not_cancel_or_report_a_loss(
+    session_factory: SessionFactory,
+) -> None:
+    """Completing a run clears its lease. A heartbeat firing just afterwards is refused, and must be
+    recognised as 'I finished' rather than 'someone took my run' (it used to cancel the worker's tail
+    end and count a lost lease; seen on a slower machine)."""
+
+    @workflow
+    async def noop(ctx):
+        return await ctx.step("s", lambda: 1)
+
+    run = await runtime.create_run(session_factory, "noop", {})
+    w = make_worker(session_factory, "w1", heartbeat_seconds=0.01)
+    claim = await w.claim_one()
+    assert claim is not None
+    async with session_factory() as session, session.begin():
+        await RunRepository(session).mark_completed(run.run_id, 1)  # releases the lease
+
+    drive = asyncio.create_task(asyncio.sleep(30))  # stands in for the tail end of _drive()
+    result = await asyncio.wait_for(w._keep_lease(claim.run_id, claim.fence, drive), timeout=5)
+
+    assert result is True and not drive.cancelled()
+    drive.cancel()
+
+
+async def test_a_heartbeat_still_reports_a_real_loss_after_a_takeover(
+    session_factory: SessionFactory,
+) -> None:
+    @workflow
+    async def noop(ctx):
+        return await ctx.step("s", lambda: 1)
+
+    run = await runtime.create_run(session_factory, "noop", {})
+    w1 = make_worker(session_factory, "w1", heartbeat_seconds=0.01)
+    claim = await w1.claim_one()
+    assert claim is not None
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE workflow_runs SET lease_expires_at = now() - interval '1 second' WHERE run_id=:r"),
+            {"r": run.run_id},
+        )
+        assert await RunRepository(session).claim_next("w2", lease_seconds=30, workflows=[("noop", 1)])
+
+    drive = asyncio.create_task(asyncio.sleep(30))
+    result = await asyncio.wait_for(w1._keep_lease(claim.run_id, claim.fence, drive), timeout=5)
+
+    assert result is False
+    await asyncio.sleep(0)
+    assert drive.cancelled()

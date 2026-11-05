@@ -93,6 +93,7 @@ tests check the payment ledger, not just the event log).
 | Worker alive but its lease taken (false failure detection) | Heartbeat notices and cancels; any write already in flight is rejected (chaos test) |
 | Worker claims a run and is taken over before writing anything | The next worker writes `WORKFLOW_STARTED`, not `RESUMED` (found by the chaos test) |
 | Database unreachable for a whole lease period | The worker cancels its own execution rather than act on a run another worker may now hold |
+| A heartbeat fires just after the run completed (the completion released the lease) | Recognised as "released by me": nothing is cancelled, no loss is reported (found by the first Windows run) |
 | Two workers poll at the same instant | `SKIP LOCKED`: each gets a different run, or one gets none |
 | Run waiting in `NEEDS_REVIEW` | Never claimed; the lease was released when it was parked |
 
