@@ -18,7 +18,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database.session import SessionFactory
 from app.engine.errors import AmbiguousOutcomeError
-from app.integrations.tools.errors import IdempotencyKeyReuseError, PaymentDeclinedError
+from app.integrations.tools.errors import (
+    IdempotencyKeyReuseError,
+    PaymentDeclinedError,
+    connection_loss_is_ambiguous,
+)
 from app.integrations.tools.fake_ledger import (
     AMBIGUOUS_AFTER_COMMIT,
     AMBIGUOUS_BEFORE_COMMIT,
@@ -90,6 +94,7 @@ class _PaymentBase:
 
 
 class IdempotentPaymentService(_PaymentBase):
+    @connection_loss_is_ambiguous
     async def refund(
         self, order_id: str, amount: int, *, idempotency_key: str, reference: str | None = None
     ) -> dict[str, Any]:
@@ -136,6 +141,7 @@ class IdempotentPaymentService(_PaymentBase):
 
 
 class NonIdempotentPaymentService(_PaymentBase):
+    @connection_loss_is_ambiguous
     async def refund(
         self,
         order_id: str,

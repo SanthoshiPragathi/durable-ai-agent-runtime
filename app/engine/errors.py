@@ -122,3 +122,21 @@ def format_error(exc: BaseException) -> dict[str, Any]:
         # Report the underlying failure, not the wrapper.
         return {"error_type": exc.error_type, "message": exc.message}
     return {"error_type": type(exc).__name__, "message": str(exc)}
+
+
+def is_infrastructure_error(exc: BaseException) -> bool:
+    """True for failures of the machinery under the runtime (database unreachable, connection reset,
+    timeout), as opposed to the workflow failing. These must NEVER be recorded as a failed run: the
+    database that would store the failure is the thing that is broken, and the cause is usually
+    temporary. The worker abandons the run instead; its lease lapses and a worker replays it from the
+    recorded history once the infrastructure is back.
+
+    Step functions cannot trigger this by raising: ctx wraps their exceptions in StepFailedError."""
+    import asyncpg
+    from sqlalchemy.exc import SQLAlchemyError
+
+    if isinstance(exc, DurableRuntimeError):
+        return False
+    return isinstance(
+        exc, SQLAlchemyError | ConnectionError | TimeoutError | asyncpg.PostgresError | asyncpg.InterfaceError
+    )

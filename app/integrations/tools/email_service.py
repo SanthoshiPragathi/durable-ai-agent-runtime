@@ -9,7 +9,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database.session import SessionFactory
 from app.engine.errors import AmbiguousOutcomeError
-from app.integrations.tools.errors import EmailDeliveryError, IdempotencyKeyReuseError
+from app.integrations.tools.errors import (
+    EmailDeliveryError,
+    IdempotencyKeyReuseError,
+    connection_loss_is_ambiguous,
+)
 from app.integrations.tools.fake_ledger import (
     AMBIGUOUS_AFTER_COMMIT,
     AMBIGUOUS_BEFORE_COMMIT,
@@ -34,6 +38,7 @@ class EmailService:
         self._sf = session_factory
         self.faults = FaultInjector()
 
+    @connection_loss_is_ambiguous
     async def send(
         self, to: str, subject: str, body: str, *, idempotency_key: str | None = None
     ) -> dict[str, Any]:

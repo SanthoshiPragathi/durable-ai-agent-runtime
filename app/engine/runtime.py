@@ -32,6 +32,7 @@ from app.engine.errors import (
     StaleLeaseError,
     WorkflowVersionMismatchError,
     format_error,
+    is_infrastructure_error,
 )
 from app.engine.execution_context import DbStepRecorder
 from app.engine.failpoints import failpoint
@@ -223,6 +224,11 @@ async def _drive(
         result = normalize_json(await definition.fn(ctx, **input_data))
         ctx.verify_replay_complete()
     except Exception as exc:
+        if is_infrastructure_error(exc):
+            # The database (or the network to it) failed. Do not record a failure: leave the run as
+            # it is and let the caller decide (a worker abandons it; its lease then lapses).
+            logger.warning("infrastructure error, run left as is", extra={"run_id": str(run_id)})
+            raise
         halt = ctx.halt
         if isinstance(halt, StaleLeaseError) or isinstance(exc, StaleLeaseError):
             # Another worker owns the run now. Record nothing (every write would be rejected anyway)

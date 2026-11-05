@@ -42,7 +42,7 @@ from app.database.repositories import (
     WorkerRepository,
 )
 from app.database.session import SessionFactory, get_default_session_factory
-from app.engine.errors import StaleLeaseError
+from app.engine.errors import StaleLeaseError, is_infrastructure_error
 from app.engine.failpoints import failpoint
 from app.engine.lease import Fence
 from app.engine.replay import ReplayHistory, StepStatus
@@ -97,6 +97,7 @@ class Worker:
         # Counters, handy in tests and logs.
         self.completed = 0
         self.lost_leases = 0
+        self.infra_errors = 0
 
     # ---- registry -------------------------------------------------------------------------
 
@@ -105,8 +106,13 @@ class Worker:
             await WorkerRepository(session).register(self.worker_id, socket.gethostname(), os.getpid())
 
     async def deregister(self) -> None:
-        async with self.session_factory() as session, session.begin():
-            await WorkerRepository(session).mark_stopped(self.worker_id)
+        try:
+            async with self.session_factory() as session, session.begin():
+                await WorkerRepository(session).mark_stopped(self.worker_id)
+        except Exception as exc:
+            if not is_infrastructure_error(exc):
+                raise
+            logger.warning("could not mark the worker stopped (database unavailable)")
 
     # ---- claiming -------------------------------------------------------------------------
 
@@ -138,6 +144,10 @@ class Worker:
             history = await self._begin(claim)
         except StaleLeaseError:
             return self._lost(run_id, "before the workflow started")
+        except Exception as exc:
+            if is_infrastructure_error(exc):
+                return self._infra(run_id, exc)
+            raise
         failpoint("after_workflow_started")
 
         drive = asyncio.create_task(
@@ -151,6 +161,10 @@ class Worker:
             run = await drive
         except StaleLeaseError:
             return self._lost(run_id, "a write was rejected")
+        except Exception as exc:
+            if is_infrastructure_error(exc):
+                return self._infra(run_id, exc)
+            raise
         except asyncio.CancelledError:
             if _heartbeat_gave_up(heartbeat):
                 return self._lost(run_id, "the heartbeat could not keep the lease")
@@ -225,6 +239,16 @@ class Worker:
                 return False
             last_confirmed = time.monotonic()
 
+    def _infra(self, run_id: uuid.UUID, exc: BaseException) -> None:
+        """The database failed under this worker. Abandon the run without recording anything: its
+        lease lapses and a worker replays it from the history once the database is back."""
+        self.infra_errors += 1
+        logger.warning(
+            "infrastructure error, abandoning the run (its lease will lapse)",
+            extra={"run_id": str(run_id), "worker_id": self.worker_id, "error": repr(exc)},
+        )
+        return None
+
     def _lost(self, run_id: uuid.UUID, why: str) -> None:
         self.lost_leases += 1
         logger.warning(
@@ -255,6 +279,23 @@ class Worker:
         async with self.session_factory() as session:
             return await RunRepository(session).count_unfinished() == 0
 
+    async def _touch(self) -> None:
+        async with self.session_factory() as session, session.begin():
+            await WorkerRepository(session).touch(self.worker_id)
+
+    async def _survive(self, fn: Any, default: Any = False) -> Any:
+        """Call fn(); if the database is unreachable, note it and return `default` so the loop
+        simply tries again after the poll interval. Anything that is not an infrastructure error
+        is a bug and propagates."""
+        try:
+            return await fn()
+        except Exception as exc:
+            if not is_infrastructure_error(exc):
+                raise
+            self.infra_errors += 1
+            logger.warning("database unavailable, will retry", extra={"worker_id": self.worker_id})
+            return default
+
     async def run_forever(self, idle_exit_seconds: float | None = None, drain: bool = False) -> None:
         """Poll for work until stopped.
 
@@ -262,19 +303,18 @@ class Worker:
         drain: also stop once no run is PENDING or RUNNING anywhere (so a worker waiting for another
                worker's lease to expire keeps waiting, then exits after the work is done).
         """
-        await self.register()
+        await self._survive(self.register)
         idle_since = time.monotonic()
         try:
             while not self.stopping.is_set():
-                if await self.run_once():
+                if await self._survive(self.run_once):
                     idle_since = time.monotonic()
                     continue
                 if idle_exit_seconds is not None and time.monotonic() - idle_since >= idle_exit_seconds:
                     break
-                if drain and await self._drained():
+                if drain and await self._survive(self._drained, default=False):
                     break
-                async with self.session_factory() as session, session.begin():
-                    await WorkerRepository(session).touch(self.worker_id)
+                await self._survive(self._touch)
                 try:
                     await asyncio.wait_for(self.stopping.wait(), timeout=self.poll_seconds)
                 except TimeoutError:
