@@ -77,7 +77,10 @@ def clean_db(migrated_database: str) -> Iterator[None]:
     engine = create_engine(to_sync_url(migrated_database), isolation_level="AUTOCOMMIT")
     with engine.connect() as conn:
         conn.execute(
-            text("TRUNCATE workflow_events, workflow_runs, workflows, workers RESTART IDENTITY CASCADE")
+            text(
+                "TRUNCATE workflow_events, workflow_runs, workflows, workers, "
+                "workflow_timers, workflow_signals RESTART IDENTITY CASCADE"
+            )
         )
     engine.dispose()
     yield

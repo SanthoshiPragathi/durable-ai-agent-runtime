@@ -1,8 +1,8 @@
 """SQLAlchemy models. PostgreSQL is the durable source of truth for execution history.
 
 Tables: workflows, workflow_runs, workflow_events (Phase 1), idempotency_records (Phase 3),
-workers plus the lease columns on workflow_runs (Phase 4). workflow_timers and workflow_signals
-arrive in Phase 5, each with its own migration.
+workers plus the lease columns on workflow_runs (Phase 4), workflow_timers and workflow_signals
+plus the WAITING status (Phase 5).
 """
 
 import enum
@@ -39,6 +39,15 @@ class RunStatus(enum.StrEnum):
     FAILED = "FAILED"
     # A step with an external effect has an unknown outcome; a person must resolve it.
     NEEDS_REVIEW = "NEEDS_REVIEW"
+    # Parked on ctx.sleep or ctx.wait_for_signal. A waiting run holds no lease and uses no worker;
+    # a timer firing or a matching signal makes it claimable again.
+    WAITING = "WAITING"
+
+
+class TimerStatus(enum.StrEnum):
+    PENDING = "PENDING"
+    FIRED = "FIRED"
+    CANCELLED = "CANCELLED"
 
 
 class IdempotencyStatus(enum.StrEnum):
@@ -52,6 +61,7 @@ class IdempotencyStatus(enum.StrEnum):
 class EventType(enum.StrEnum):
     WORKFLOW_STARTED = "WORKFLOW_STARTED"
     WORKFLOW_RESUMED = "WORKFLOW_RESUMED"
+    WORKFLOW_WAITING = "WORKFLOW_WAITING"
     STEP_STARTED = "STEP_STARTED"
     STEP_COMPLETED = "STEP_COMPLETED"
     STEP_FAILED = "STEP_FAILED"
@@ -118,6 +128,8 @@ class WorkflowRun(Base):
     #   lease_expires_at  when the lease lapses unless the owner renews it (database clock)
     #   fencing_token     +1 on every claim. Every write by a worker must carry the token it was
     #                     given; a write carrying an older token is rejected (StaleLeaseError).
+    # Set while status is WAITING on a signal: the signal name that wakes the run.
+    waiting_signal: Mapped[str | None] = mapped_column(String(200))
     lease_owner: Mapped[str | None] = mapped_column(String(100))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fencing_token: Mapped[int] = mapped_column(
@@ -203,3 +215,70 @@ class IdempotencyRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class WorkflowTimer(Base):
+    """A durable timer: a ctx.sleep, or the timeout of a ctx.wait_for_signal.
+
+    fire_at is computed once, from the database clock, when the wait is first registered, so a
+    replay or a restart never moves it. One timer per (run, step).
+    """
+
+    __tablename__ = "workflow_timers"
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_name", name="uq_workflow_timers_run_step"),
+        CheckConstraint(f"status IN ({_sql_list(TimerStatus)})", name="ck_workflow_timers_status"),
+        CheckConstraint("kind IN ('SLEEP', 'SIGNAL_TIMEOUT')", name="ck_workflow_timers_kind"),
+        Index(
+            "ix_workflow_timers_due",
+            "fire_at",
+            postgresql_where=text("status = 'PENDING'"),
+        ),
+    )
+
+    timer_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_runs.run_id"), nullable=False
+    )
+    step_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    fire_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default=TimerStatus.PENDING.value)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WorkflowSignal(Base):
+    """A message sent to a run from outside (a human approval, a webhook).
+
+    Stored the moment it arrives, even if the run is not waiting yet (an early signal is not lost).
+    A wait consumes the oldest unconsumed signal with its name, once. idempotency_key makes a
+    redelivered signal a no-op: unique per run.
+    """
+
+    __tablename__ = "workflow_signals"
+    __table_args__ = (
+        Index(
+            "uq_workflow_signals_idempotency",
+            "run_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
+        Index("ix_workflow_signals_run_name", "run_id", "name", "signal_id"),
+    )
+
+    signal_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_runs.run_id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    payload: Mapped[Any] = _json_column()
+    idempotency_key: Mapped[str | None] = mapped_column(String(200))
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    consumed_by_step: Mapped[str | None] = mapped_column(String(200))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
