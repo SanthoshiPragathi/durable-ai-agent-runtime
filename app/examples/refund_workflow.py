@@ -31,6 +31,9 @@ FAKE_ORDERS: dict[str, dict[str, Any]] = {
     },
 }
 
+VALID_VERDICTS = ("APPROVE", "REJECT")
+REVIEW_TIMEOUT_SECONDS = 3 * 24 * 3600  # how long a human has to settle an unclear AI answer
+
 REFUND_WINDOW_DAYS = 30
 AUTO_REFUND_LIMIT_CENTS = 100_000
 
@@ -64,7 +67,26 @@ async def refund_workflow(ctx, order_id: str) -> dict[str, Any]:
             f"Answer exactly APPROVE or REJECT.\nComplaint: {order['complaint']}"
         ),
     )
-    if verdict.strip().upper() != "APPROVE":
+    answer = verdict.strip().upper()
+    if answer not in VALID_VERDICTS:
+        # The model said something that is neither APPROVE nor REJECT. Never turn that into a silent
+        # rejection (or approval): park the run and let a person decide with a "refund_review" signal
+        # carrying {"decision": "APPROVE"} or {"decision": "REJECT"}.
+        review = await ctx.wait_for_signal(
+            "review_classification", signal="refund_review", timeout=REVIEW_TIMEOUT_SECONDS
+        )
+        decision = ""
+        if review["received"]:
+            decision = str((review["payload"] or {}).get("decision", "")).strip().upper()
+        if decision not in VALID_VERDICTS:
+            reason = (
+                "the AI answer was invalid and no reviewer answered in time"
+                if not review["received"]
+                else "the reviewer's decision must be APPROVE or REJECT"
+            )
+            return {"order_id": order_id, "status": "ESCALATED", "reason": reason}
+        answer = decision
+    if answer != "APPROVE":
         return {"order_id": order_id, "status": "REJECTED", "reason": "complaint not justified"}
 
     refund = await ctx.effect(

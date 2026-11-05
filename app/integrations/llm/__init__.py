@@ -12,7 +12,7 @@ def get_llm_provider(settings: Settings | None = None) -> LLMProvider:
         return MockLLMProvider()
     if settings.llm_provider == "openai":
         return OpenAIProvider(
-            api_key=settings.openai_api_key,
+            api_key=settings.openai_api_key.get_secret_value(),
             default_model=settings.openai_model,
             input_price_per_1m=settings.openai_input_price_per_1m,
             output_price_per_1m=settings.openai_output_price_per_1m,

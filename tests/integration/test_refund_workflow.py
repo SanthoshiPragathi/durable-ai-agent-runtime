@@ -223,3 +223,71 @@ async def test_run_status_lookup_helpers_agree_with_the_ledger(
         run = await RunRepository(session).get_run(run_id)
     ledger = await payments.list_refunds()
     assert run.status == "COMPLETED" and run.result_data["refund_id"] == ledger[0]["refund_id"]
+
+
+# ---- an unclear AI answer goes to a person, never to a silent decision ----------------------------
+
+
+async def review(sf: SessionFactory, run_id: uuid.UUID, decision: object):
+    """Send the reviewer's decision and let a worker finish the run."""
+    from app.engine.signals import send_signal
+    from app.engine.worker import Worker
+
+    await send_signal(sf, run_id, "refund_review", {"decision": decision})
+    worker = Worker(sf, "reviewer-w", lease_seconds=30.0, heartbeat_seconds=10.0, poll_seconds=0.05)
+    await worker.run_until_idle()
+    async with sf() as session:
+        run = await RunRepository(session).get_run(run_id)
+    assert run is not None
+    return run
+
+
+@pytest.mark.parametrize("garbage", ["maybe?", "", "APPROVE.", "I think we should approve this refund"])
+async def test_an_invalid_ai_answer_parks_the_run_instead_of_deciding(
+    session_factory: SessionFactory, payments: IdempotentPaymentService, mail: EmailService, garbage: str
+) -> None:
+    run_id, run = await go(session_factory, "ORD-1001", MockLLMProvider(garbage))
+
+    assert run.status == "WAITING" and run.waiting_signal == "refund_review"
+    assert (await payments.count_refunds(), len(await mail.list_emails())) == (0, 0)
+
+
+async def test_a_reviewer_can_approve_after_an_invalid_ai_answer(
+    session_factory: SessionFactory, payments: IdempotentPaymentService, mail: EmailService
+) -> None:
+    llm = MockLLMProvider("unsure")
+    run_id, _ = await go(session_factory, "ORD-1001", llm)
+    done = await review(session_factory, run_id, "approve")
+
+    assert done.status == "COMPLETED" and done.result_data["status"] == "REFUNDED"
+    assert await payments.count_refunds() == 1
+    assert len(llm.calls) == 1  # the resume replayed the recorded answer; the model was not asked again
+
+
+async def test_a_reviewer_can_reject_after_an_invalid_ai_answer(
+    session_factory: SessionFactory, payments: IdempotentPaymentService, mail: EmailService
+) -> None:
+    run_id, _ = await go(session_factory, "ORD-1001", MockLLMProvider("unsure"))
+    done = await review(session_factory, run_id, "REJECT")
+
+    assert done.result_data["status"] == "REJECTED"
+    assert await payments.count_refunds() == 0
+
+
+async def test_an_unusable_reviewer_decision_escalates_instead_of_guessing(
+    session_factory: SessionFactory, payments: IdempotentPaymentService, mail: EmailService
+) -> None:
+    run_id, _ = await go(session_factory, "ORD-1001", MockLLMProvider("unsure"))
+    done = await review(session_factory, run_id, "probably")
+
+    assert done.status == "COMPLETED" and done.result_data["status"] == "ESCALATED"
+    assert await payments.count_refunds() == 0
+
+
+@pytest.mark.parametrize("spoken", ["APPROVE", " reject\n", "Approve"])
+async def test_valid_answers_are_accepted_regardless_of_case_and_whitespace(
+    session_factory: SessionFactory, payments: IdempotentPaymentService, mail: EmailService, spoken: str
+) -> None:
+    _, run = await go(session_factory, "ORD-1001", MockLLMProvider(spoken))
+    assert run.status == "COMPLETED"
+    assert run.result_data["status"] == ("REFUNDED" if spoken.strip().upper() == "APPROVE" else "REJECTED")

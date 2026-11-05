@@ -33,10 +33,13 @@ from app.engine.errors import (
     RunSuspendedError,
     StaleLeaseError,
     StepFailedError,
+    StepTimeoutError,
+    TransientError,
 )
 from app.engine.hashing import hash_step_input, normalize_json
 from app.engine.replay import RecordedStep, ReplayHistory, StepStatus
 from app.integrations.llm.base import LLMProvider
+from app.sdk.retry import RetryPolicy
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,7 @@ class WorkflowContext:
         rng: Callable[[], float] | None = None,
         llm: LLMProvider | None = None,
         retry_delay: float = 0.05,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.run_id = run_id
         self._recorder = recorder
@@ -119,6 +123,8 @@ class WorkflowContext:
         self._rng = rng or _random.random
         self._llm = llm
         self._retry_delay = retry_delay
+        self._retry_policy = retry_policy or RetryPolicy()
+        self._retry_rng = _random.Random()  # only jitters sleeps; never recorded or replayed
         self._auto_counters: dict[str, int] = {}
         self._used_step_names: set[str] = set()
         self._step_index = 0
@@ -152,10 +158,12 @@ class WorkflowContext:
         Step names must be unique within a run (in a loop: f"fetch_{i}"). If `fn` raises, the
         failure is recorded and StepFailedError is raised. When resuming, a step that already
         completed returns its recorded result without calling `fn`; a recorded failure raises
-        StepFailedError again.
+        StepFailedError again. If `fn` raises TransientError, or an attempt exceeds the policy's
+        timeout, the call is retried under the run's RetryPolicy before it counts as a failure.
         """
         input_hash = hash_step_input(args, kwargs)
-        return await self._execute(name, input_hash, lambda: fn(*args, **kwargs))
+        call = self._retrying(lambda: fn(*args, **kwargs), self._retry_policy)
+        return await self._execute(name, input_hash, call)
 
     async def effect(
         self,
@@ -209,11 +217,21 @@ class WorkflowContext:
         """A random float in [0, 1), recorded. A replay returns the originally drawn value."""
         return await self._execute(self._auto_name("random"), hash_step_input((), {}), self._rng)
 
-    async def llm(self, name: str, prompt: str, *, model: str | None = None, **params: Any) -> str:
+    async def llm(
+        self,
+        name: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        retry: RetryPolicy | None = None,
+        **params: Any,
+    ) -> str:
         """Ask the LLM and return its text answer. The call is recorded as a step named `name`.
 
         Recorded: output, model, a hash of the prompt (not the prompt itself), input/output tokens,
-        estimated cost (None if unknown), latency in ms and a timestamp. A replay returns the
+        estimated cost (None if unknown), latency in ms, how many attempts it took and a timestamp.
+        A transient provider failure (LLMTransientError, or an attempt over the timeout) is retried
+        under `retry` (default: the run's RetryPolicy). A replay returns the
         recorded output and never calls the model again, so a different answer on a re-run cannot
         change the workflow's path. `params` (e.g. temperature) must be JSON-serializable.
         """
@@ -223,9 +241,18 @@ class WorkflowContext:
         chosen_model = model or provider.default_model
         input_hash = hash_step_input((), {"prompt": prompt, "model": chosen_model, "params": params})
 
+        attempts = 1
+
+        def note_attempt(n: int) -> None:
+            nonlocal attempts
+            attempts = n
+
+        async def one_call() -> Any:
+            return await provider.complete(prompt, model=chosen_model, **params)
+
         async def call() -> dict[str, Any]:
             started = time.perf_counter()
-            response = await provider.complete(prompt, model=chosen_model, **params)
+            response = await self._retrying(one_call, retry or self._retry_policy, note_attempt)()
             latency_ms = (time.perf_counter() - started) * 1000
             return {
                 "output": response.output,
@@ -235,6 +262,7 @@ class WorkflowContext:
                 "output_tokens": response.output_tokens,
                 "cost_usd": response.cost_usd,
                 "latency_ms": round(latency_ms, 3),
+                "attempts": attempts,
                 "timestamp": self._clock().astimezone(UTC).isoformat(),
             }
 
@@ -286,6 +314,46 @@ class WorkflowContext:
             raise self._halt
 
     # ---- internals --------------------------------------------------------------------------
+
+    def _retrying(
+        self,
+        call: Callable[[], Any],
+        policy: RetryPolicy,
+        on_attempts: Callable[[int], None] | None = None,
+    ) -> Callable[[], Any]:
+        """Wrap `call` so a TransientError (or a timeout) is retried with backoff and jitter.
+
+        Only for plain steps and LLM calls. Before every retry the lease is re-checked, so a worker
+        that lost its run stops instead of carrying on. Anything that is not transient, and the last
+        transient failure once the attempts are used up, propagates unchanged.
+        """
+
+        async def run() -> Any:
+            attempt = 1
+            while True:
+                try:
+                    result = call()
+                    if inspect.isawaitable(result):
+                        if policy.timeout is None:
+                            result = await result
+                        else:
+                            try:
+                                result = await asyncio.wait_for(result, policy.timeout)
+                            except TimeoutError as exc:
+                                raise StepTimeoutError(
+                                    f"attempt {attempt} exceeded {policy.timeout}s"
+                                ) from exc
+                    if on_attempts is not None:
+                        on_attempts(attempt)
+                    return result
+                except TransientError:
+                    if attempt >= policy.max_attempts:
+                        raise
+                    await asyncio.sleep(policy.delay_for(attempt, self._retry_rng))
+                    await self._recorder.ensure_lease()
+                    attempt += 1
+
+        return run
 
     def _auto_name(self, kind: str) -> str:
         # Deterministic names, so replay matches the n-th now()/random() call with its recording.

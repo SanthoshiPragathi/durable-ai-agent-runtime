@@ -274,3 +274,14 @@ async def test_a_draining_worker_waits_for_near_timers_not_for_signals_or_far_ti
     async with session_factory() as session, session.begin():
         await session.execute(text("UPDATE workflow_timers SET status='CANCELLED'"))
     assert await worker._drained() is True
+
+
+async def test_an_idle_worker_backs_off_and_throttles_its_heartbeat_writes(
+    session_factory: SessionFactory,
+) -> None:
+    worker = Worker(session_factory, "idle-w", lease_seconds=10.0, heartbeat_seconds=0.5, poll_seconds=0.05)
+    await worker.run_forever(idle_exit_seconds=1.5)
+
+    # Polling every 0.05 s for 1.5 s would be about 30 polls and 30 heartbeat writes.
+    assert 3 <= worker.polls < 22
+    assert 1 <= worker.touches <= 4

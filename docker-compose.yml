@@ -5,10 +5,10 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: durable
-      POSTGRES_PASSWORD: durable   # local development only
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-durable}   # set POSTGRES_PASSWORD (env or .env) for anything beyond a laptop
       POSTGRES_DB: durable
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # reachable from this machine only, not from the network
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./scripts/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
@@ -21,11 +21,14 @@ services:
   api:
     build: .
     environment:
-      DATABASE_URL: postgresql+asyncpg://durable:durable@postgres:5432/durable
-      SERVICES_DATABASE_URL: postgresql+asyncpg://durable:durable@postgres:5432/fake_services
+      DATABASE_URL: postgresql+asyncpg://durable:${POSTGRES_PASSWORD:-durable}@postgres:5432/durable
+      SERVICES_DATABASE_URL: postgresql+asyncpg://durable:${POSTGRES_PASSWORD:-durable}@postgres:5432/fake_services
       EXECUTION_MODE: workers   # the API records runs; the worker service executes them
+      API_OPERATOR_KEYS: ${API_OPERATOR_KEYS:-}   # empty = authentication off (local development only)
+      API_READONLY_KEYS: ${API_READONLY_KEYS:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"   # change to "8000:8000" only after setting API_OPERATOR_KEYS
     depends_on:
       postgres:
         condition: service_healthy
@@ -34,10 +37,11 @@ services:
     build: .
     command: ["python", "-m", "app.engine.worker"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://durable:durable@postgres:5432/durable
-      SERVICES_DATABASE_URL: postgresql+asyncpg://durable:durable@postgres:5432/fake_services
+      DATABASE_URL: postgresql+asyncpg://durable:${POSTGRES_PASSWORD:-durable}@postgres:5432/durable
+      SERVICES_DATABASE_URL: postgresql+asyncpg://durable:${POSTGRES_PASSWORD:-durable}@postgres:5432/fake_services
       LEASE_DURATION_SECONDS: "15"
       HEARTBEAT_INTERVAL_SECONDS: "5"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

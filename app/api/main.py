@@ -3,13 +3,14 @@
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, Request, status
+from fastapi import Depends, FastAPI, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 
 import app.examples.leave_approval_workflow  # noqa: F401
 import app.examples.refund_workflow  # noqa: F401  (importing registers the example workflows)
 import app.examples.simple_workflow  # noqa: F401
 import app.examples.slow_workflow  # noqa: F401
+from app.api.auth import auth_enabled, require_api_key
 from app.api.routes import runs, services, workers, workflows
 from app.engine.errors import (
     DurableRuntimeError,
@@ -28,10 +29,17 @@ app = FastAPI(
     description="Fault-tolerant execution engine for AI workflows.",
     version="0.1.0",
 )
-app.include_router(workflows.router)
-app.include_router(runs.router)
-app.include_router(services.router)
-app.include_router(workers.router)
+_protected = [Depends(require_api_key)]  # a no-op unless API_OPERATOR_KEYS / API_READONLY_KEYS are set
+app.include_router(workflows.router, dependencies=_protected)
+app.include_router(runs.router, dependencies=_protected)
+app.include_router(services.router, dependencies=_protected)
+app.include_router(workers.router, dependencies=_protected)
+
+if not auth_enabled():
+    logger.warning(
+        "API authentication is OFF (no API_OPERATOR_KEYS / API_READONLY_KEYS set); "
+        "do not expose this server beyond localhost"
+    )
 
 _STATUS_BY_ERROR: dict[type[DurableRuntimeError], int] = {
     WorkflowNotFoundError: status.HTTP_404_NOT_FOUND,

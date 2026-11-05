@@ -7,8 +7,18 @@ otherwise cost_usd is None rather than a guess from stale built-in prices.
 
 from typing import Any
 
-from app.engine.errors import LLMConfigurationError
+from app.engine.errors import LLMConfigurationError, LLMTransientError
 from app.integrations.llm.base import LLMResponse
+
+_TRANSIENT_CLASS_NAMES = {"APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError"}
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Rate limits, overload and network trouble are worth retrying; a bad request or key is not."""
+    if any(cls.__name__ in _TRANSIENT_CLASS_NAMES for cls in type(exc).__mro__):
+        return True
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and (status in (408, 409, 429) or status >= 500)
 
 
 class OpenAIProvider:
@@ -34,9 +44,14 @@ class OpenAIProvider:
 
     async def complete(self, prompt: str, *, model: str | None = None, **params: Any) -> LLMResponse:
         chosen = model or self.default_model
-        response = await self._client.chat.completions.create(
-            model=chosen, messages=[{"role": "user", "content": prompt}], **params
-        )
+        try:
+            response = await self._client.chat.completions.create(
+                model=chosen, messages=[{"role": "user", "content": prompt}], **params
+            )
+        except Exception as exc:
+            if _is_transient(exc):
+                raise LLMTransientError(f"{type(exc).__name__}: {exc}") from exc
+            raise
         usage = getattr(response, "usage", None)
         input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)

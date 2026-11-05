@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import logging
 import os
+import random
 import signal
 import socket
 import sys
@@ -92,6 +93,20 @@ class Worker:
         self.poll_seconds = settings.worker_poll_interval_seconds if poll_seconds is None else poll_seconds
         if self.heartbeat_seconds >= self.lease_seconds:
             raise ValueError("heartbeat_seconds must be shorter than lease_seconds")
+        # Idle polling backs off exponentially (capped) with jitter, and resets as soon as work is found.
+        # An explicit poll_seconds (tests, --poll) keeps the cap close to it so reaction time stays short.
+        self.poll_max_seconds = max(
+            self.poll_seconds,
+            settings.worker_poll_max_interval_seconds if poll_seconds is None else poll_seconds * 4,
+        )
+        self.poll_backoff = max(1.0, settings.worker_poll_backoff_factor)
+        self.poll_jitter = min(1.0, max(0.0, settings.worker_poll_jitter))
+        # The idle loop refreshes the worker's heartbeat row at most this often (never slower than the
+        # lease heartbeat, so the dashboard's "alive" test, which allows one lease period, stays true).
+        self.touch_seconds = min(settings.worker_touch_interval_seconds, self.heartbeat_seconds)
+        self._last_touch = float("-inf")
+        self.polls = 0  # claim attempts made while idle; handy in tests and metrics
+        self.touches = 0
         self._llm = llm_provider
         self.stopping = asyncio.Event()
         # Counters, handy in tests and logs.
@@ -280,8 +295,21 @@ class Worker:
             return await RunRepository(session).count_unfinished() == 0
 
     async def _touch(self) -> None:
+        """Refresh the worker's heartbeat row, but not on every poll (it is a write)."""
+        now = time.monotonic()
+        if now - self._last_touch < self.touch_seconds:
+            return
         async with self.session_factory() as session, session.begin():
             await WorkerRepository(session).touch(self.worker_id)
+        self._last_touch = now
+        self.touches += 1
+
+    def idle_delay(self, idle_polls: int) -> float:
+        """Seconds to wait after `idle_polls` consecutive empty polls: exponential, capped, jittered."""
+        base = min(self.poll_max_seconds, self.poll_seconds * self.poll_backoff**idle_polls)
+        if self.poll_jitter:
+            base *= random.uniform(1 - self.poll_jitter, 1 + self.poll_jitter)
+        return min(self.poll_max_seconds * (1 + self.poll_jitter), base)
 
     async def _survive(self, fn: Any, default: Any = False) -> Any:
         """Call fn(); if the database is unreachable, note it and return `default` so the loop
@@ -305,20 +333,24 @@ class Worker:
         """
         await self._survive(self.register)
         idle_since = time.monotonic()
+        idle_polls = 0
         try:
             while not self.stopping.is_set():
                 if await self._survive(self.run_once):
                     idle_since = time.monotonic()
+                    idle_polls = 0
                     continue
+                self.polls += 1
                 if idle_exit_seconds is not None and time.monotonic() - idle_since >= idle_exit_seconds:
                     break
                 if drain and await self._survive(self._drained, default=False):
                     break
                 await self._survive(self._touch)
                 try:
-                    await asyncio.wait_for(self.stopping.wait(), timeout=self.poll_seconds)
+                    await asyncio.wait_for(self.stopping.wait(), timeout=self.idle_delay(idle_polls))
                 except TimeoutError:
                     pass
+                idle_polls += 1
         finally:
             await self.deregister()
 

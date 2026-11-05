@@ -6,6 +6,7 @@ No secrets are hardcoded here. Defaults are safe for local development only.
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,11 +28,30 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = 1.0
 
     llm_provider: str = "mock"  # "mock" or "openai"
-    openai_api_key: str = ""
+    openai_api_key: SecretStr = SecretStr("")
     openai_model: str = "gpt-4o-mini"
     # Optional. Without both prices the recorded cost is None (unknown), not a guess.
     openai_input_price_per_1m: float | None = None
     openai_output_price_per_1m: float | None = None
+
+    # Retries for plain steps and LLM calls on transient failures (never for external effects).
+    retry_max_attempts: int = 3
+    retry_base_delay_seconds: float = 0.5
+    retry_max_delay_seconds: float = 30.0
+    retry_jitter: float = 0.2
+    step_timeout_seconds: float | None = None  # per-attempt limit for plain steps and LLM calls
+
+    # API authentication. Comma-separated keys. Both empty = auth OFF (local development only).
+    #   operator keys may read and write; read-only keys may only issue GET requests.
+    api_operator_keys: SecretStr = SecretStr("")
+    api_readonly_keys: SecretStr = SecretStr("")
+
+    # Idle workers poll with exponential backoff (capped) and jitter; they write their heartbeat
+    # row at most this often instead of on every poll.
+    worker_poll_backoff_factor: float = 1.5
+    worker_poll_max_interval_seconds: float = 5.0
+    worker_poll_jitter: float = 0.2
+    worker_touch_interval_seconds: float = 5.0
 
     log_level: str = "INFO"
 

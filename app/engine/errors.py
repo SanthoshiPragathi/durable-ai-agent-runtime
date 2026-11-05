@@ -94,6 +94,23 @@ class LLMConfigurationError(DurableRuntimeError):
     """No usable LLM provider is configured."""
 
 
+class TransientError(Exception):
+    """A failure that is worth trying again: a rate limit, a dropped connection, a timeout.
+
+    Raise it (or a subclass) from a plain ctx.step or from an LLM provider and the runtime retries the
+    call under the run's RetryPolicy. It is never used for ctx.effect: an effect whose outcome is in
+    doubt goes through the idempotency and reconciliation rules instead (AmbiguousOutcomeError).
+    """
+
+
+class StepTimeoutError(TransientError):
+    """A plain step or LLM call did not finish within the policy's per-attempt timeout."""
+
+
+class LLMTransientError(TransientError):
+    """The LLM provider failed in a way that is safe to retry (rate limit, overload, network)."""
+
+
 class RunSuspendedError(DurableRuntimeError):
     """Raised inside the workflow when it reaches a wait (ctx.sleep, ctx.wait_for_signal) that is not
     over yet. The run has been parked as WAITING and released its lease; the runtime catches this, it is

@@ -36,7 +36,8 @@
 </style>
 </head>
 <body>
-<header><h1>Durable AI Agent Runtime</h1><small id="stamp">loading...</small></header>
+<header><h1>Durable AI Agent Runtime</h1><small id="stamp">loading...</small>
+  <button id="keyBtn" class="alt" style="margin-left:auto" title="Set the API key for this tab">API key</button></header>
 <main>
   <section>
     <h2>Runs</h2>
@@ -62,8 +63,28 @@ const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"
 const j = (v) => esc(JSON.stringify(v));
 const short = (id) => esc(String(id).slice(0, 8));
 
-async function api(path, opts) {
-  const r = await fetch(path, opts);
+// The API may require a key (API_OPERATOR_KEYS / API_READONLY_KEYS). It is kept in sessionStorage for
+// this tab only, sent as X-API-Key, and asked for once; the "API key" button changes it.
+let keyDeclined = false;
+const getKey = () => { try { return sessionStorage.getItem("apiKey") || ""; } catch { return ""; } };
+function askKey() {
+  const k = window.prompt("This API requires a key. Enter your API key:");
+  if (k && k.trim()) { try { sessionStorage.setItem("apiKey", k.trim()); } catch {} keyDeclined = false; return true; }
+  keyDeclined = true; return false;
+}
+async function api(path, opts = {}) {
+  const attempt = async () => {
+    const key = getKey();
+    const r = await fetch(path, {...opts, headers: {...(opts.headers || {}), ...(key ? {"x-api-key": key} : {})}});
+    return {r, key};
+  };
+  let {r, key} = await attempt();
+  if (r.status === 401) {
+    // Several requests fly at once on load: if another one has already supplied a key, just retry with it.
+    if (getKey() !== key) ({r} = await attempt());
+    else if (!keyDeclined && askKey()) ({r} = await attempt());
+  }
+  if (r.status === 401) throw new Error("API key required: click \"API key\" in the header");
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(body.detail || r.statusText);
   return body;
@@ -173,6 +194,7 @@ async function refresh() {
   } catch (e) { $("stamp").textContent = "error: " + e.message; }
 }
 $("filter").onchange = refresh;
+$("keyBtn").onclick = () => { if (askKey()) refresh(); };
 refresh();
 setInterval(() => { if (!document.activeElement || !["INPUT","TEXTAREA","SELECT"].includes(document.activeElement.tagName)) refresh(); }, 3000);
 </script>

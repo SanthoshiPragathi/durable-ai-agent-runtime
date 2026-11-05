@@ -19,6 +19,7 @@ import logging
 import uuid
 from typing import Any
 
+from app.config import get_settings
 from app.database.models import EventType, IdempotencyStatus, RunStatus, WorkflowRun
 from app.database.repositories import EventRepository, IdempotencyRepository, RunRepository
 from app.database.session import SessionFactory
@@ -41,6 +42,7 @@ from app.engine.lease import Fence
 from app.engine.replay import ReplayHistory, StepStatus
 from app.integrations.llm import LLMProvider, get_llm_provider
 from app.sdk.context import WorkflowContext
+from app.sdk.retry import RetryPolicy
 from app.sdk.workflow import WorkflowDefinition, registry
 
 logger = logging.getLogger(__name__)
@@ -219,6 +221,7 @@ async def _drive(
         DbStepRecorder(run_id, session_factory, fence),
         history,
         llm=llm_provider or get_llm_provider(),
+        retry_policy=RetryPolicy.from_settings(get_settings()),
     )
     try:
         result = normalize_json(await definition.fn(ctx, **input_data))
