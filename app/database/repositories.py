@@ -197,6 +197,15 @@ class RunRepository:
                 f"run is now at token {token} (owner {owner!r}); write rejected"
             )
 
+    async def count_unfinished(self) -> int:
+        """Runs that are PENDING or RUNNING (not completed, failed or waiting for a reviewer)."""
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(WorkflowRun)
+            .where(WorkflowRun.status.in_([RunStatus.PENDING.value, RunStatus.RUNNING.value]))
+        )
+        return result.scalar_one()
+
     async def mark_running(self, run_id: uuid.UUID) -> bool:
         """PENDING -> RUNNING. Returns False if the run was not PENDING.
 

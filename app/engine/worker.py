@@ -234,8 +234,17 @@ class Worker:
             count += 1
         return count
 
-    async def run_forever(self, idle_exit_seconds: float | None = None) -> None:
-        """Poll for work until stopped (or until idle for `idle_exit_seconds`, if given)."""
+    async def _drained(self) -> bool:
+        async with self.session_factory() as session:
+            return await RunRepository(session).count_unfinished() == 0
+
+    async def run_forever(self, idle_exit_seconds: float | None = None, drain: bool = False) -> None:
+        """Poll for work until stopped.
+
+        idle_exit_seconds: also stop after this long without claiming anything.
+        drain: also stop once no run is PENDING or RUNNING anywhere (so a worker waiting for another
+               worker's lease to expire keeps waiting, then exits after the work is done).
+        """
         await self.register()
         idle_since = time.monotonic()
         try:
@@ -244,6 +253,8 @@ class Worker:
                     idle_since = time.monotonic()
                     continue
                 if idle_exit_seconds is not None and time.monotonic() - idle_since >= idle_exit_seconds:
+                    break
+                if drain and await self._drained():
                     break
                 async with self.session_factory() as session, session.begin():
                     await WorkerRepository(session).touch(self.worker_id)
@@ -264,6 +275,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--heartbeat", type=float, help="lease renewal interval in seconds")
     parser.add_argument("--poll", type=float, help="seconds between polls when idle")
     parser.add_argument("--idle-exit", type=float, help="exit after this many idle seconds")
+    parser.add_argument(
+        "--drain", action="store_true", help="exit once no run is PENDING or RUNNING (for tests and demos)"
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=get_settings().log_level, format="%(asctime)s %(levelname)s %(message)s")
@@ -285,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
             except NotImplementedError:  # Windows: Ctrl+C still raises KeyboardInterrupt
                 pass
         try:
-            await worker.run_forever(idle_exit_seconds=args.idle_exit)
+            await worker.run_forever(idle_exit_seconds=args.idle_exit, drain=args.drain)
         finally:
             await session_factory.kw["bind"].dispose()
         print(
