@@ -15,11 +15,11 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 from app.config import to_sync_url
 from app.database.repositories import EventRepository, RunRepository
-from app.database.session import SessionFactory
+from app.database.session import SessionFactory, create_sync_engine
 from app.engine import runtime
 from app.engine.worker import Worker
 from app.integrations.llm import MockLLMProvider
@@ -60,7 +60,7 @@ def reset(db_url: str, services_url: str) -> None:
         (db_url, "workflow_events, idempotency_records, workflow_runs, workflows, workers"),
         (services_url, "payment_refunds, emails"),
     ):
-        engine = create_engine(to_sync_url(url), isolation_level="AUTOCOMMIT")
+        engine = create_sync_engine(to_sync_url(url), isolation_level="AUTOCOMMIT")
         with engine.connect() as conn:
             conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
         engine.dispose()

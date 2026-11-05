@@ -105,7 +105,9 @@ async def test_outages_and_lost_acks_never_fail_a_run_or_duplicate_an_effect(
 
     for seed in range(SEEDS):
         outage.active = False
-        reset(migrated_database, services_database_url)
+        # reset() is synchronous; run it off the event loop so a slow database cannot freeze the
+        # workers' heartbeats (and be misread as lost leases).
+        await asyncio.to_thread(reset, migrated_database, services_database_url)
         rng = random.Random(seed)
         run_ids = [
             (await runtime.create_run(session_factory, "refund_workflow", {"order_id": "ORD-1001"})).run_id

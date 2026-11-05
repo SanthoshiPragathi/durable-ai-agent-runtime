@@ -3,10 +3,11 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import create_engine, pool
+from sqlalchemy import pool
 
 from app.config import get_settings, to_sync_url
 from app.database.models import Base
+from app.database.session import create_sync_engine
 
 config = context.config
 if config.config_file_name is not None:
@@ -26,7 +27,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    engine = create_engine(_url(), poolclass=pool.NullPool)
+    engine = create_sync_engine(_url(), poolclass=pool.NullPool)
     with engine.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():

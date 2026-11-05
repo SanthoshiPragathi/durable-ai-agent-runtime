@@ -13,14 +13,19 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import to_sync_url
-from app.database.session import SessionFactory, create_session_factory
+from app.database.session import (
+    SessionFactory,
+    async_connect_args,
+    create_session_factory,
+    create_sync_engine,
+)
 from app.integrations.tools.fake_ledger import ServicesBase
 from app.sdk.workflow import registry
 
@@ -42,7 +47,7 @@ def migrated_database(test_database_url: str) -> str:
     )
 
     try:
-        admin = create_engine(sync_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+        admin = create_sync_engine(sync_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
         with admin.connect() as conn:
             exists = conn.execute(
                 text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": sync_url.database}
@@ -53,7 +58,7 @@ def migrated_database(test_database_url: str) -> str:
     except OperationalError as exc:
         pytest.skip(f"PostgreSQL is not reachable ({exc.orig}); integration tests skipped")
 
-    engine = create_engine(sync_url, isolation_level="AUTOCOMMIT")
+    engine = create_sync_engine(sync_url, isolation_level="AUTOCOMMIT")
     with engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
@@ -74,7 +79,7 @@ def alembic_config(sync_url: str) -> Config:
 @pytest.fixture
 def clean_db(migrated_database: str) -> Iterator[None]:
     """Empty all tables before each integration test (TRUNCATE is allowed on the event log)."""
-    engine = create_engine(to_sync_url(migrated_database), isolation_level="AUTOCOMMIT")
+    engine = create_sync_engine(to_sync_url(migrated_database), isolation_level="AUTOCOMMIT")
     with engine.connect() as conn:
         conn.execute(
             text(
@@ -89,7 +94,7 @@ def clean_db(migrated_database: str) -> Iterator[None]:
 @pytest_asyncio.fixture
 async def session_factory(clean_db: None, migrated_database: str) -> AsyncIterator[SessionFactory]:
     # NullPool: each test gets fresh connections, no cross-event-loop reuse.
-    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    engine = create_async_engine(migrated_database, poolclass=NullPool, connect_args=async_connect_args())
     yield create_session_factory(engine)
     await engine.dispose()
 
@@ -114,7 +119,7 @@ def services_database_url(migrated_database: str) -> str:
     sync_url = make_url(to_sync_url(url))
     assert sync_url.database and sync_url.database.endswith("_test")
 
-    admin = create_engine(sync_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    admin = create_sync_engine(sync_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
     with admin.connect() as conn:
         exists = conn.execute(
             text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": sync_url.database}
@@ -123,7 +128,7 @@ def services_database_url(migrated_database: str) -> str:
             conn.execute(text(f'CREATE DATABASE "{sync_url.database}"'))
     admin.dispose()
 
-    engine = create_engine(sync_url, isolation_level="AUTOCOMMIT")
+    engine = create_sync_engine(sync_url, isolation_level="AUTOCOMMIT")
     with engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
@@ -134,7 +139,7 @@ def services_database_url(migrated_database: str) -> str:
 
 @pytest.fixture
 def clean_services_db(services_database_url: str) -> Iterator[None]:
-    engine = create_engine(to_sync_url(services_database_url), isolation_level="AUTOCOMMIT")
+    engine = create_sync_engine(to_sync_url(services_database_url), isolation_level="AUTOCOMMIT")
     with engine.connect() as conn:
         conn.execute(text("TRUNCATE payment_refunds, emails RESTART IDENTITY"))
     engine.dispose()
@@ -145,6 +150,6 @@ def clean_services_db(services_database_url: str) -> Iterator[None]:
 async def services_session_factory(
     clean_services_db: None, services_database_url: str
 ) -> AsyncIterator[SessionFactory]:
-    engine = create_async_engine(services_database_url, poolclass=NullPool)
+    engine = create_async_engine(services_database_url, poolclass=NullPool, connect_args=async_connect_args())
     yield create_session_factory(engine)
     await engine.dispose()

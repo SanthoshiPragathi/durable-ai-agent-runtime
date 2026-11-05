@@ -14,13 +14,13 @@ from typing import Any
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import to_sync_url
 from app.database.repositories import EventRepository, RunRepository
-from app.database.session import create_session_factory
+from app.database.session import async_connect_args, create_session_factory, create_sync_engine
 from app.engine import runtime
 from app.integrations.tools import IdempotentPaymentService, NonIdempotentPaymentService
 from app.integrations.tools.fake_ledger import AMBIGUOUS_AFTER_COMMIT, AMBIGUOUS_BEFORE_COMMIT
@@ -46,7 +46,7 @@ def reset(db_url: str, services_url: str) -> None:
         (db_url, "workflow_events, idempotency_records, workflow_runs, workflows"),
         (services_url, "payment_refunds, emails"),
     ):
-        engine = create_engine(to_sync_url(url), isolation_level="AUTOCOMMIT")
+        engine = create_sync_engine(to_sync_url(url), isolation_level="AUTOCOMMIT")
         with engine.connect() as conn:
             conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
         engine.dispose()
@@ -60,8 +60,8 @@ async def scenario(
     db_url: str,
     services_url: str,
 ) -> dict[str, Any]:
-    engine = create_async_engine(db_url, poolclass=NullPool)
-    services_engine = create_async_engine(services_url, poolclass=NullPool)
+    engine = create_async_engine(db_url, poolclass=NullPool, connect_args=async_connect_args())
+    services_engine = create_async_engine(services_url, poolclass=NullPool, connect_args=async_connect_args())
     sf, ssf = create_session_factory(engine), create_session_factory(services_engine)
     saved = registry.snapshot()
     registry.clear()
@@ -205,8 +205,10 @@ def test_the_property_test_has_teeth_a_plain_step_does_duplicate(
     reset(migrated_database, services_database_url)
 
     async def naive() -> int:
-        engine = create_async_engine(migrated_database, poolclass=NullPool)
-        services_engine = create_async_engine(services_database_url, poolclass=NullPool)
+        engine = create_async_engine(migrated_database, poolclass=NullPool, connect_args=async_connect_args())
+        services_engine = create_async_engine(
+            services_database_url, poolclass=NullPool, connect_args=async_connect_args()
+        )
         sf, ssf = create_session_factory(engine), create_session_factory(services_engine)
         saved = registry.snapshot()
         registry.clear()

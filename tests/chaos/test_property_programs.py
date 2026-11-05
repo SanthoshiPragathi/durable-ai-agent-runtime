@@ -25,13 +25,13 @@ from unittest import mock
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import to_sync_url
 from app.database.repositories import EventRepository, RunRepository
-from app.database.session import create_session_factory
+from app.database.session import async_connect_args, create_session_factory, create_sync_engine
 from app.engine import runtime
 from app.integrations.llm import MockLLMProvider
 from app.sdk import workflow
@@ -55,7 +55,7 @@ crashes_st = st.lists(
 
 
 def reset(db_url: str) -> None:
-    engine = create_engine(to_sync_url(db_url), isolation_level="AUTOCOMMIT")
+    engine = create_sync_engine(to_sync_url(db_url), isolation_level="AUTOCOMMIT")
     with engine.connect() as conn:
         conn.execute(
             text(
@@ -80,7 +80,7 @@ def step_names(program: list[str]) -> list[str]:
 
 
 async def scenario(program: list[str], crashes: list[tuple[int, str]], db_url: str) -> dict[str, Any]:
-    engine = create_async_engine(db_url, poolclass=NullPool)
+    engine = create_async_engine(db_url, poolclass=NullPool, connect_args=async_connect_args())
     sf = create_session_factory(engine)
     saved = registry.snapshot()
     registry.clear()

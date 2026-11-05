@@ -18,6 +18,12 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://durable:durable@localhost:5432/fake_services"
     )
 
+    # Upper bounds on talking to PostgreSQL, so a database that accepts the TCP connection but never
+    # answers (a restarting container, a stalled port proxy) turns into an error the worker can retry,
+    # not a hang. Connect: opening a connection, including the handshake. Command: one statement.
+    db_connect_timeout_seconds: float = 10.0
+    db_command_timeout_seconds: float | None = 60.0
+
     # "inline": the API process executes runs itself (single process, simplest to try out).
     # "workers": the API only records runs; worker processes (python -m app.engine.worker) execute them.
     execution_mode: Literal["inline", "workers"] = "inline"

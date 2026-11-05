@@ -37,3 +37,18 @@ does not rely on the runtime's own bookkeeping: the fake payment/email ledgers l
   outage; a Docker restart is longer, which exercises lease expiry harder.
 * Workflow code that catches the database exception itself and carries on is outside what the runtime can protect.
 * Disk-full, partial-write and clock-jump faults are not injected.
+
+## If a database test hangs (Windows / Docker Desktop)
+
+Every connection to PostgreSQL is now bounded: `DB_CONNECT_TIMEOUT_SECONDS` (default 10) covers opening a
+connection including the handshake, `DB_COMMAND_TIMEOUT_SECONDS` (default 60) covers one statement. A database
+that accepts the TCP connection but never answers therefore fails fast with an error (the worker counts it as an
+infrastructure error and retries on its next poll) instead of blocking forever. If a test now fails with a
+connect timeout instead of hanging, the database really is not answering; check, in order:
+
+1. `docker compose ps` shows `postgres` healthy, and `docker compose logs postgres --tail 50` has no crash loop.
+2. Try `127.0.0.1` instead of `localhost` (`TEST_DATABASE_URL=postgresql+asyncpg://durable:durable@127.0.0.1:5432/durable_test`
+   and `TEST_SERVICES_DATABASE_URL=...@127.0.0.1:5432/durable_services_test`). On Windows `localhost` can resolve to `::1`
+   first, and Docker Desktop publishes the port on `127.0.0.1` only.
+3. The chaos tests open many short-lived connections (about 100 per second in `test_db_outage.py`, because the test
+   engines use `NullPool`). A slow Docker Desktop port proxy may stall under that rate.
