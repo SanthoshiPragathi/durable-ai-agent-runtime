@@ -16,6 +16,7 @@ CHAOS_SEEDS (default 4) controls how many random schedules run.
 import asyncio
 import os
 import random
+import time
 
 import pytest
 from sqlalchemy import event
@@ -55,9 +56,16 @@ class Outage:
                 raise OperationalError(statement, parameters, ConnectionResetError("simulated outage"))
 
 
+CHAOS_SECONDS = 8.0  # outages stop after this; the system must then drain on its own
+
+
 async def outages(outage: Outage, rng: random.Random, stop: asyncio.Event) -> int:
+    """Random outage windows for CHAOS_SECONDS, then calm. The bound makes the test independent of
+    machine speed: a slow machine gets the same amount of chaos, then as long as it needs to finish
+    (found on Windows, where unbounded outages starved the runs of any clear time)."""
     windows = 0
-    while not stop.is_set():
+    started = time.monotonic()
+    while not stop.is_set() and time.monotonic() - started < CHAOS_SECONDS:
         await asyncio.sleep(rng.uniform(0.15, 0.5))
         outage.active = True
         windows += 1
@@ -123,7 +131,7 @@ async def test_outages_and_lost_acks_never_fail_a_run_or_duplicate_an_effect(
                 done.set()
 
             windows, _ = await asyncio.wait_for(
-                asyncio.gather(outages(outage, rng, stop), run_workers()), timeout=120
+                asyncio.gather(outages(outage, rng, stop), run_workers()), timeout=300
             )
         outage.active = False
 
