@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Durable AI Agent Runtime</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c2430; --mute:#6b7685; --line:#e3e7ee; --accent:#2f5bea; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:#1c2430; color:#fff; padding:12px 20px; display:flex; gap:16px; align-items:center; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header small { color:#9fb0c5; }
+  main { display:grid; grid-template-columns: minmax(380px, 1fr) 1.4fr; gap:16px; padding:16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--mute); margin:0 0 8px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr.run { cursor:pointer; } tr.run:hover, tr.sel { background:#eef2ff; }
+  .pill { padding:1px 8px; border-radius:10px; font-size:12px; color:#fff; background:#6b7685; white-space:nowrap; }
+  .COMPLETED{background:#1f9d55}.RUNNING{background:#2f5bea}.WAITING{background:#b7791f}
+  .FAILED{background:#c53030}.NEEDS_REVIEW{background:#c05621}.PENDING{background:#718096}
+  code, pre { font-family: ui-monospace, Menlo, Consolas, monospace; font-size:12px; }
+  pre { background:#f1f3f7; padding:6px 8px; border-radius:6px; overflow:auto; max-height:140px; margin:4px 0; }
+  .mute { color:var(--mute); } .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0; }
+  input, select, button, textarea { font:inherit; padding:4px 8px; border:1px solid var(--line); border-radius:6px; }
+  button { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; }
+  button.alt { background:#fff; color:var(--accent); }
+  .ev { border-left:3px solid var(--line); padding:2px 0 2px 10px; margin:2px 0; }
+  .ev.STEP_COMPLETED{border-color:#1f9d55}.ev.STEP_FAILED,.ev.WORKFLOW_FAILED{border-color:#c53030}
+  .ev.WORKFLOW_WAITING{border-color:#b7791f}.ev.STEP_OUTCOME_UNKNOWN{border-color:#c05621}
+  .ev.WORKFLOW_RESUMED,.ev.WORKFLOW_STARTED{border-color:#2f5bea}
+  .diff-same{color:#1f9d55}.diff-diff{color:#c53030;font-weight:600}
+  #msg { color:#c53030; margin:4px 0; min-height:1em; }
+</style>
+</head>
+<body>
+<header><h1>Durable AI Agent Runtime</h1><small id="stamp">loading...</small></header>
+<main>
+  <section>
+    <h2>Runs</h2>
+    <div class="row">
+      <select id="filter"><option value="">all statuses</option><option>PENDING</option><option>RUNNING</option>
+        <option>WAITING</option><option>NEEDS_REVIEW</option><option>COMPLETED</option><option>FAILED</option></select>
+      <span class="mute" id="counts"></span>
+    </div>
+    <table><thead><tr><th>run</th><th>workflow</th><th>status</th><th>worker</th></tr></thead>
+      <tbody id="runs"></tbody></table>
+    <h2 style="margin-top:14px">Workers</h2>
+    <table><tbody id="workers"></tbody></table>
+  </section>
+  <section id="detail"><p class="mute">Select a run.</p></section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let selected = location.hash.slice(1) || null;
+const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const j = (v) => esc(JSON.stringify(v));
+const short = (id) => esc(String(id).slice(0, 8));
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || r.statusText);
+  return body;
+}
+function say(text) { $("msg") && ($("msg").textContent = text || ""); }
+
+async function loadRuns() {
+  const status = $("filter").value;
+  const runs = await api("/runs?limit=100" + (status ? "&status=" + status : ""));
+  $("runs").innerHTML = runs.map((r) =>
+    `<tr class="run ${r.run_id === selected ? "sel" : ""}" data-id="${r.run_id}">
+       <td><code>${short(r.run_id)}</code>${r.parent_run_id ? ' <span class="mute" title="fork">&#8627;' + short(r.parent_run_id) + "</span>" : ""}</td>
+       <td>${esc(r.workflow_name)}</td><td><span class="pill ${r.status}">${r.status}</span></td>
+       <td class="mute">${esc(r.lease_owner || "")}</td></tr>`).join("") || '<tr><td class="mute">no runs</td></tr>';
+  $("runs").querySelectorAll("tr.run").forEach((tr) => (tr.onclick = () => select(tr.dataset.id)));
+  $("counts").textContent = runs.length + " shown";
+}
+async function loadWorkers() {
+  const ws = await api("/workers");
+  $("workers").innerHTML = ws.map((w) =>
+    `<tr><td>${esc(w.worker_id)}</td><td class="mute">pid ${w.pid}</td>
+     <td><span class="pill ${w.alive ? "COMPLETED" : w.status === "ACTIVE" ? "FAILED" : "PENDING"}">${w.alive ? "alive" : w.status === "ACTIVE" ? "silent (dead?)" : w.status.toLowerCase()}</span></td></tr>`
+  ).join("") || '<tr><td class="mute">no workers registered</td></tr>';
+}
+
+async function select(id) { selected = id; location.hash = id; await Promise.all([loadRuns(), loadDetail()]); }
+
+async function loadDetail() {
+  if (!selected) return;
+  const [run, events, timers, signals, ops] = await Promise.all([
+    api("/runs/" + selected), api(`/runs/${selected}/events`), api(`/runs/${selected}/timers`),
+    api(`/runs/${selected}/signals`), api(`/runs/${selected}/external-operations`)]);
+  const steps = [...new Set(events.filter((e) => e.event_type === "STEP_STARTED").map((e) => e.step_name))];
+  $("detail").innerHTML = `
+    <h2>Run <code>${esc(run.run_id)}</code> <span class="pill ${run.status}">${run.status}</span></h2>
+    <div class="mute">${esc(run.workflow_name)} v${run.workflow_version}
+      &middot; token ${run.fencing_token} &middot; lease ${esc(run.lease_owner || "none")}
+      ${run.waiting_signal ? "&middot; waiting for signal <b>" + esc(run.waiting_signal) + "</b>" : ""}</div>
+    <pre>input ${j(run.input_data)}\nresult ${j(run.result_data)}${run.error_message ? "\nerror " + esc(run.error_message) : ""}</pre>
+    <div id="msg"></div>
+    <h2>Timeline</h2>
+    ${events.map((e) => `<div class="ev ${e.event_type}"><b>${e.sequence_number}</b> ${e.event_type}
+       ${e.step_name ? "<code>" + esc(e.step_name) + "</code>" : ""}
+       ${e.result_data != null ? '<span class="mute">' + j(e.result_data).slice(0, 160) + "</span>" : ""}</div>`).join("")}
+    <h2 style="margin-top:12px">Timers</h2>
+    ${timers.map((t) => `<div>${esc(t.step_name)} ${t.kind} <span class="pill ${t.status === "PENDING" ? "WAITING" : "COMPLETED"}">${t.status}</span>
+       fires ${esc(t.fire_at)}</div>`).join("") || '<span class="mute">none</span>'}
+    <h2 style="margin-top:12px">Signals</h2>
+    ${signals.map((s) => `<div>#${s.signal_id} <b>${esc(s.name)}</b> ${j(s.payload)}
+       <span class="mute">${s.consumed_by_step ? "consumed by " + esc(s.consumed_by_step) : "not consumed"}</span></div>`).join("") || '<span class="mute">none</span>'}
+    <div class="row"><input id="sigName" placeholder="signal name" value="${esc(run.waiting_signal || "")}">
+      <input id="sigPayload" placeholder='payload JSON, e.g. {"approved":true}' size="26">
+      <button id="sigBtn">Send signal</button></div>
+    <h2 style="margin-top:12px">External operations</h2>
+    ${ops.map((o) => `<div><code>${esc(o.idempotency_key)}</code> ${o.status} <span class="mute">attempts ${o.attempts}</span></div>`).join("") || '<span class="mute">none</span>'}
+    <h2 style="margin-top:12px">Fork &amp; diff</h2>
+    <div class="row"><select id="forkStep">${steps.map((s) => `<option>${esc(s)}</option>`).join("")}</select>
+      <input id="forkOverride" placeholder="override result JSON (optional)" size="24">
+      <button id="forkBtn" class="alt">Fork from step</button></div>
+    <div class="row"><input id="diffId" placeholder="other run id" size="38"><button id="diffBtn" class="alt">Diff</button></div>
+    <div id="diffOut"></div>`;
+  $("sigBtn").onclick = async () => {
+    try {
+      const raw = $("sigPayload").value.trim();
+      await api(`/runs/${selected}/signals/${encodeURIComponent($("sigName").value)}`, {
+        method: "POST", headers: {"content-type": "application/json"},
+        body: JSON.stringify({payload: raw ? JSON.parse(raw) : null}) });
+      await refresh();
+    } catch (e) { say(e.message); }
+  };
+  $("forkBtn").onclick = async () => {
+    try {
+      const raw = $("forkOverride").value.trim();
+      const body = {from_step: $("forkStep").value, use_override: raw !== "", override_result: raw ? JSON.parse(raw) : null};
+      const fork = await api(`/runs/${selected}/fork`, {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(body)});
+      await select(fork.run_id);
+    } catch (e) { say(e.message); }
+  };
+  $("diffBtn").onclick = async () => {
+    try {
+      const d = await api(`/runs/${selected}/diff/${$("diffId").value.trim()}`);
+      $("diffOut").innerHTML = `<div class="mute">first divergence: <b>${esc(d.first_divergence || "none")}</b></div>` +
+        d.steps.map((s) => `<div class="${s.identical ? "diff-same" : "diff-diff"}">${s.identical ? "same   " : "differs"} ${esc(s.step_name)}
+          <span class="mute">${j(s.result_a)} &rarr; ${j(s.result_b)}</span></div>`).join("");
+    } catch (e) { say(e.message); }
+  };
+}
+
+async function refresh() {
+  try {
+    await Promise.all([loadRuns(), loadWorkers(), selected ? loadDetail() : null]);
+    $("stamp").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) { $("stamp").textContent = "error: " + e.message; }
+}
+$("filter").onchange = refresh;
+refresh();
+setInterval(() => { if (!document.activeElement || !["INPUT","TEXTAREA","SELECT"].includes(document.activeElement.tagName)) refresh(); }, 3000);
+</script>
+</body>
+</html>

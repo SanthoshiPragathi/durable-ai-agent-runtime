@@ -1,9 +1,10 @@
 """FastAPI entrypoint."""
 
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 import app.examples.leave_approval_workflow  # noqa: F401
 import app.examples.refund_workflow  # noqa: F401  (importing registers the example workflows)
@@ -59,6 +60,12 @@ async def unexpected_error_handler(_request: Request, _exc: Exception) -> JSONRe
     # Never leak stack traces or internals to API clients; details go to the server log.
     logger.exception("unhandled error")
     return JSONResponse({"detail": "internal error"}, status_code=500)
+
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard() -> FileResponse:
+    """A dependency-free single-page dashboard (plain HTML and JavaScript, no build step)."""
+    return FileResponse(Path(__file__).resolve().parent.parent / "static" / "dashboard.html")
 
 
 @app.get("/health", tags=["meta"])
