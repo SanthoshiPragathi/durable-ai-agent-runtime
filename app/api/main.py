@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
+import app.examples.leave_approval_workflow  # noqa: F401
 import app.examples.refund_workflow  # noqa: F401  (importing registers the example workflows)
 import app.examples.simple_workflow  # noqa: F401
 import app.examples.slow_workflow  # noqa: F401
