@@ -44,7 +44,7 @@ async def main() -> int:
         procs = [
             subprocess.Popen(
                 [sys.executable, "-m", "app.engine.worker", "--id", f"worker-{i + 1}", "--drain",
-                 "--poll", "0.1"],
+                 "--poll", "0.1", "--lease", "60", "--heartbeat", "10"],
                 cwd=ROOT, env={**os.environ}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
             for i in range(WORKERS)
@@ -58,6 +58,7 @@ async def main() -> int:
         print(f"   (the steps alone add up to {serial:.1f}s, so one worker could not finish sooner)")
         per_worker: Counter[str] = Counter()
         problems = 0
+        takeovers = 0
         for run_id in run_ids:
             async with sf() as session:
                 run = await RunRepository(session).get_run(run_id)
@@ -65,12 +66,20 @@ async def main() -> int:
             types = [e.event_type for e in events]
             started_by = events[0].result_data["worker_id"]
             per_worker[started_by] += 1
-            if run.status != "COMPLETED" or types.count("STEP_COMPLETED") != 3 or run.fencing_token != 1:
+            takeovers += run.fencing_token - 1
+            # The real invariant: the run completed and each step completed exactly once. A takeover
+            # (fencing token above 1) is not an error, but it is reported: on a machine that stalls
+            # for longer than the lease, another worker legitimately takes the run over.
+            if run.status != "COMPLETED" or types.count("STEP_COMPLETED") != 3:
                 problems += 1
+                print(f"   PROBLEM run {str(run_id)[:8]}: status={run.status} "
+                      f"steps_completed={types.count('STEP_COMPLETED')} token={run.fencing_token} "
+                      f"error={run.error_message}")
         print("   runs executed per worker:")
         for name, count in sorted(per_worker.items()):
             print(f"     {name}: {count}  {'#' * count}")
-        print(f"   completed: {RUNS - problems}/{RUNS}; every run was claimed exactly once (fencing token 1)")
+        note = "every run was claimed exactly once" if not takeovers else f"{takeovers} takeover(s) happened"
+        print(f"   completed: {RUNS - problems}/{RUNS}; {note}")
         if problems:
             print(f"   {problems} run(s) did not complete cleanly")
             return 1

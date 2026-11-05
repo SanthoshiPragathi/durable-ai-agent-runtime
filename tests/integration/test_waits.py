@@ -251,18 +251,26 @@ async def test_a_directly_executed_run_can_wait_and_be_resumed(session_factory) 
     assert (await run_of(session_factory, run.run_id)).status == "COMPLETED"
 
 
-async def test_a_draining_worker_waits_for_sleeping_runs_but_not_for_signals(session_factory) -> None:
+async def test_a_draining_worker_waits_for_near_timers_not_for_signals_or_far_timers(session_factory) -> None:
     register_approval([])
 
     @workflow
-    async def napper(ctx):
+    async def short_nap(ctx):
+        await ctx.sleep("nap", 5)
+
+    @workflow
+    async def long_nap(ctx):
         await ctx.sleep("nap", 3600)
 
-    await runtime.create_run(session_factory, "approval", {})
-    await runtime.create_run(session_factory, "napper", {})
     worker = make_worker(session_factory)
+    await runtime.create_run(session_factory, "approval", {})  # waits for a signal, no timeout
+    await runtime.create_run(session_factory, "long_nap", {})  # timer due in an hour
     await worker.run_until_idle()
-    assert await worker._drained() is False  # the napper's timer is pending
+    assert await worker._drained() is True  # nothing a worker can advance soon
+
+    await runtime.create_run(session_factory, "short_nap", {})
+    await worker.run_until_idle()
+    assert await worker._drained() is False  # a timer is due within the horizon: keep waiting
     async with session_factory() as session, session.begin():
         await session.execute(text("UPDATE workflow_timers SET status='CANCELLED'"))
-    assert await worker._drained() is True  # only the signal wait remains: no worker can advance it
+    assert await worker._drained() is True

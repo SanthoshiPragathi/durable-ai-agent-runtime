@@ -112,6 +112,14 @@ and the overall timeout is 300 s. The same run's benchmarks on Windows/Docker: 8
 1, 2 and 4 workers; replay of 500 steps 63 ms; recovery 1.6 s (claim p50 shows 0.0 ms because the Windows timer
 is coarser than the claim).
 
+## A runtime flaw found on Windows (final verify run)
+
+The final Windows run passed all 317 tests but `demo_multi_worker` took 64 s instead of 6.5 s and reported 3 of 12
+runs clean. Reproduced in the sandbox with a leftover WAITING run (3 day timeout) in the dev database: a
+`--drain` worker counted that timer as work to wait for. Fixed: drain only waits for timers due within 60 s
+(`test_a_draining_worker_waits_for_near_timers_not_for_signals_or_far_timers`). The demo also now uses a 60 s
+lease and reports takeovers separately from real failures.
+
 ## A bug the tests found
 
 The randomized test found a real duplicate-refund bug in the first Phase 3 implementation (a reviewer's

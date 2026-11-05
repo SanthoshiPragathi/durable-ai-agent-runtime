@@ -86,8 +86,9 @@ signals). Sending to a `COMPLETED` or `FAILED` run is `409`; an unknown run is `
 - Timer accuracy is the worker poll interval (default 1 s) plus claim time. This is not a high-precision scheduler.
 - `EXECUTION_MODE=inline` has no workers, so nothing fires timers there; signals still wake runs (resumed in the
   API process). Use `EXECUTION_MODE=workers` for sleeps and timeouts.
-- `--drain` workers wait for pending timers of waiting runs, but not for signal waits without a timeout (no
-  worker can advance those).
+- `--drain` workers wait for timers due within 60 seconds, but not for signal waits or far-away timers (a 3 day
+  timeout): a draining worker must not hang on an unrelated waiting run. (Found when a leftover waiting run
+  made `demo_multi_worker` run for over a minute on Windows.)
 - Workflow code must not call `asyncio.sleep` for long waits; use `ctx.sleep` so the wait is durable.
 - Signals are not an event type in the history; their receipt time and consumer are in `workflow_signals`,
   their consumption in the wait step's `STEP_COMPLETED`.
