@@ -9,11 +9,14 @@ from app.api.schemas import (
     ErrorOut,
     EventOut,
     ExternalOperationOut,
+    ForkRequest,
     ResolveStepRequest,
+    RunDiffOut,
     RunOut,
     SignalIn,
     SignalOut,
     SignalReceiptOut,
+    StepDiffOut,
     TimerOut,
 )
 from app.config import get_settings
@@ -27,6 +30,7 @@ from app.database.repositories import (
 from app.database.session import SessionFactory
 from app.engine import runtime
 from app.engine.errors import RunNotFoundError
+from app.engine.forks import _UNSET, diff_runs, fork_run
 from app.engine.signals import send_signal
 
 logger = logging.getLogger(__name__)
@@ -183,3 +187,49 @@ async def list_timers(
             raise RunNotFoundError(f"run {run_id} does not exist")
         rows = await WaitRepository(session).list_timers(run_id)
     return [TimerOut.model_validate(r) for r in rows]
+
+
+@router.post(
+    "/{run_id}/fork",
+    response_model=RunOut,
+    status_code=202,
+    responses={404: {"model": ErrorOut}, 409: {"model": ErrorOut}},
+    summary="Fork the run at a step; a worker re-executes the fork from there",
+)
+async def post_fork(
+    run_id: uuid.UUID,
+    body: ForkRequest,
+    session_factory: SessionFactory = Depends(get_session_factory),
+) -> RunOut:
+    fork = await fork_run(
+        session_factory,
+        run_id,
+        body.from_step,
+        override_result=body.override_result if body.use_override else _UNSET,
+        input_overrides=body.input_overrides,
+    )
+    return RunOut.model_validate(fork)
+
+
+@router.get(
+    "/{run_id}/diff/{other_run_id}",
+    response_model=RunDiffOut,
+    responses={404: {"model": ErrorOut}},
+    summary="Compare two runs step by step",
+)
+async def get_diff(
+    run_id: uuid.UUID,
+    other_run_id: uuid.UUID,
+    session_factory: SessionFactory = Depends(get_session_factory),
+) -> RunDiffOut:
+    d = await diff_runs(session_factory, run_id, other_run_id)
+    return RunDiffOut(
+        run_a=d.run_a,
+        run_b=d.run_b,
+        first_divergence=d.first_divergence,
+        status_a=d.status_a,
+        status_b=d.status_b,
+        result_a=d.result_a,
+        result_b=d.result_b,
+        steps=[StepDiffOut(**{**s.__dict__, "identical": s.identical}) for s in d.steps],
+    )

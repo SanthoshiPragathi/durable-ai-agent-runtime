@@ -27,6 +27,10 @@ class InvalidRunStateError(DurableRuntimeError):
     """A run was not in the state required for the requested transition."""
 
 
+class ForkError(InvalidRunStateError):
+    """The run cannot be forked at that point (unknown step, earlier step not completed, nothing run yet)."""
+
+
 class DuplicateEventError(DurableRuntimeError):
     """An event would violate an event-log uniqueness rule (e.g. a step completing twice)."""
 

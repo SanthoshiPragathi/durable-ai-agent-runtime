@@ -10,13 +10,13 @@ Only results that were actually observed are listed here. Re-run them yourself w
 | Python | 3.13.18 |
 | PostgreSQL | 16.15 (UTF-8) |
 | Key packages | pytest 9.2.0, Hypothesis 6.170.14, SQLAlchemy 2.1.6, asyncpg 0.32.0 |
-| Also confirmed by the author | Phases 1, 2 and 3 (64, 121 and 229 tests) pass on Windows, Python 3.12.6, PostgreSQL 16 in Docker (Phase 3: 229 passed in about 3-4 minutes there). Phase 4 on Windows: first run (275 tests) had 2 failures, both explained below and fixed; the rerun (277 tests) passed in about 3 min 14 s. Phase 5 on Windows: not yet recorded. |
+| Also confirmed by the author | Phases 1, 2 and 3 (64, 121 and 229 tests) pass on Windows, Python 3.12.6, PostgreSQL 16 in Docker (Phase 3: 229 passed in about 3-4 minutes there). Phase 4 on Windows: first run (275 tests) had 2 failures, both explained below and fixed; the rerun (277 tests) passed in about 3 min 14 s. Phase 5 on Windows: 306 tests, lint, migrations and all five demos passed via `scripts/verify.ps1`. |
 
 ## Results
 
 | Suite | Command | Tests | Result |
 |---|---|---|---|
-| Everything | `pytest` | 306 | **306 passed** (3 min 52 s on Linux) |
+| Everything | `pytest` | 313 | **313 passed** (3 min 35 s on Linux) |
 | Unit (no database) | `pytest -m "not integration"` | 91 | passed |
 | Integration (PostgreSQL) | `pytest -m integration` | 186 | passed |
 | of which crash/resume (`recovery`) | `pytest -m recovery` | 80 | passed |

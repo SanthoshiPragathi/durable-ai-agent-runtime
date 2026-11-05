@@ -18,7 +18,7 @@ Step "Migrate" { alembic upgrade head }
 Step "Lint (ruff)" { ruff check . }
 Step "All tests (about 4 minutes)" { python -m pytest -q }
 foreach ($demo in "demo_crash_recovery", "demo_duplicate_refund", "demo_multi_worker",
-                  "demo_zombie_worker", "demo_durable_waiting") {
+                  "demo_zombie_worker", "demo_durable_waiting", "demo_forking") {
     Step "Demo: $demo" { python "scripts\$demo.py" }
 }
 
