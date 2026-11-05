@@ -90,6 +90,12 @@ class LLMConfigurationError(DurableRuntimeError):
     """No usable LLM provider is configured."""
 
 
+class StaleLeaseError(DurableRuntimeError):
+    """A write was attempted with an out-of-date fencing token: the run has been claimed by another
+    worker (or finished) since this worker got it. The write is rejected and nothing is recorded.
+    The worker holding the stale token must stop executing the run."""
+
+
 class CorruptHistoryError(DurableRuntimeError):
     """The recorded event history is internally inconsistent."""
 

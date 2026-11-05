@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from app.api.deps import get_session_factory
 from app.api.schemas import ErrorOut, EventOut, ExternalOperationOut, ResolveStepRequest, RunOut
+from app.config import get_settings
 from app.database.models import RunStatus
 from app.database.repositories import EventRepository, IdempotencyRepository, RunRepository
 from app.database.session import SessionFactory
@@ -17,7 +18,7 @@ router = APIRouter(prefix="/runs", tags=["runs"])
 
 
 async def _resume_in_background(session_factory: SessionFactory, run_id: uuid.UUID) -> None:
-    # TEMPORARY (until Phase 4 workers): resumes inside the API process after a reviewer's decision.
+    # EXECUTION_MODE=inline only: resumes inside the API process after a reviewer's decision.
     try:
         await runtime.resume_run(session_factory, run_id)
     except Exception:
@@ -101,6 +102,7 @@ async def resolve_step(
 ) -> RunOut:
     if body.outcome == "completed" and "result" not in body.model_fields_set:
         raise HTTPException(422, "outcome 'completed' requires a `result`")
+    inline = get_settings().execution_mode == "inline"
     run = await runtime.resolve_unknown_step(
         session_factory,
         run_id,
@@ -109,6 +111,8 @@ async def resolve_step(
         result=body.result,
         message=body.message,
         resolved_by=body.resolved_by,
+        make_claimable=not inline,  # with workers, the reopened run is picked up by one of them
     )
-    background_tasks.add_task(_resume_in_background, session_factory, run_id)
+    if inline:
+        background_tasks.add_task(_resume_in_background, session_factory, run_id)
     return RunOut.model_validate(run)

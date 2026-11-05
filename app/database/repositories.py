@@ -4,7 +4,7 @@ changes (e.g. a completion event plus the run's status) commit or roll back toge
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,11 +14,56 @@ from app.database.models import (
     IdempotencyRecord,
     IdempotencyStatus,
     RunStatus,
+    Worker,
     Workflow,
     WorkflowEvent,
     WorkflowRun,
 )
-from app.engine.errors import DuplicateEventError, InvalidRunStateError, RunNotFoundError
+from app.engine.errors import (
+    DuplicateEventError,
+    InvalidRunStateError,
+    RunNotFoundError,
+    StaleLeaseError,
+)
+from app.engine.lease import Fence
+
+
+def _seconds(value: float):
+    """A SQL interval of `value` seconds."""
+    return func.make_interval(0, 0, 0, 0, 0, 0, value)
+
+
+_NO_LEASE = {"lease_owner": None, "lease_expires_at": None}
+
+# Claim one run: a never-started run, or a RUNNING run whose lease lapsed (its worker died or
+# stalled). FOR UPDATE SKIP LOCKED makes concurrent claimers pass over rows another claimer (or
+# an in-flight write by the old owner) holds, so no run is handed to two workers. now() is the
+# database's clock, so workers with skewed clocks cannot disagree about expiry. A NULL
+# lease_expires_at means "executed directly, not by a worker" and is never claimed.
+_CLAIM_SQL = text(
+    """
+    UPDATE workflow_runs AS r
+    SET lease_owner = :worker_id,
+        lease_expires_at = now() + make_interval(secs => :lease_seconds),
+        fencing_token = r.fencing_token + 1,
+        status = 'RUNNING',
+        started_at = COALESCE(r.started_at, now())
+    FROM (
+        SELECT run_id, status AS prior_status
+        FROM workflow_runs
+        WHERE (workflow_name, workflow_version) IN (
+                  SELECT * FROM unnest(CAST(:names AS text[]), CAST(:versions AS int[])))
+          AND (status = 'PENDING'
+               OR (status = 'RUNNING' AND lease_expires_at IS NOT NULL AND lease_expires_at < now()))
+        ORDER BY created_at, run_id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+    ) AS c
+    WHERE r.run_id = c.run_id
+    RETURNING r.run_id, r.fencing_token, c.prior_status, r.workflow_name, r.workflow_version,
+              r.input_data, r.lease_expires_at
+    """
+)
 
 
 class RunRepository:
@@ -70,6 +115,97 @@ class RunRepository:
         result = await self._session.execute(stmt.limit(limit).offset(offset))
         return list(result.scalars())
 
+    # ---- leases and fencing (Phase 4) ------------------------------------------------------
+
+    async def claim_next(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: float,
+        workflows: list[tuple[str, int]],
+    ) -> dict[str, Any] | None:
+        """Atomically take one claimable run for `worker_id`. Returns its details, or None.
+
+        `workflows` lists the (name, version) pairs this worker's code can run; others are skipped.
+        The returned dict has run_id, fencing_token, resumed (True if this is a takeover of a run
+        a previous worker had started), workflow_name, workflow_version, input_data.
+        """
+        if not workflows:
+            return None
+        row = (
+            (
+                await self._session.execute(
+                    _CLAIM_SQL,
+                    {
+                        "worker_id": worker_id,
+                        "lease_seconds": lease_seconds,
+                        "names": [name for name, _ in workflows],
+                        "versions": [version for _, version in workflows],
+                    },
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "fencing_token": row["fencing_token"],
+            "resumed": row["prior_status"] == RunStatus.RUNNING.value,
+            "workflow_name": row["workflow_name"],
+            "workflow_version": row["workflow_version"],
+            "input_data": row["input_data"],
+        }
+
+    async def renew_lease(self, run_id: uuid.UUID, fence: Fence, lease_seconds: float) -> bool:
+        """Extend the lease. False means the caller no longer holds it (reclaimed or finished)."""
+        result = await self._session.execute(
+            update(WorkflowRun)
+            .where(
+                WorkflowRun.run_id == run_id,
+                WorkflowRun.lease_owner == fence.worker_id,
+                WorkflowRun.fencing_token == fence.token,
+                WorkflowRun.status == RunStatus.RUNNING.value,
+            )
+            .values(lease_expires_at=func.now() + _seconds(lease_seconds))
+            .returning(WorkflowRun.run_id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def check_fence(self, run_id: uuid.UUID, fence: Fence) -> None:
+        """Raise StaleLeaseError unless `fence` is still the run's current lease holder.
+
+        Takes the run's row lock (the same lock event appends and claims use), so the check and the
+        writes that follow it in this transaction cannot interleave with a takeover: either the
+        takeover committed first and this fails, or this transaction commits first and the
+        takeover waits for it.
+        """
+        row = (
+            await self._session.execute(
+                select(WorkflowRun.fencing_token, WorkflowRun.lease_owner)
+                .where(WorkflowRun.run_id == run_id)
+                .with_for_update()
+            )
+        ).first()
+        if row is None:
+            raise RunNotFoundError(f"run {run_id} does not exist")
+        token, owner = row
+        if token != fence.token or owner != fence.worker_id:
+            raise StaleLeaseError(
+                f"worker {fence.worker_id!r} holds token {fence.token} for run {run_id}, but the "
+                f"run is now at token {token} (owner {owner!r}); write rejected"
+            )
+
+    async def count_unfinished(self) -> int:
+        """Runs that are PENDING or RUNNING (not completed, failed or waiting for a reviewer)."""
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(WorkflowRun)
+            .where(WorkflowRun.status.in_([RunStatus.PENDING.value, RunStatus.RUNNING.value]))
+        )
+        return result.scalar_one()
+
     async def mark_running(self, run_id: uuid.UUID) -> bool:
         """PENDING -> RUNNING. Returns False if the run was not PENDING.
 
@@ -96,18 +232,26 @@ class RunRepository:
         await self._finish(run_id, RunStatus.FAILED, error_message=error_message)
 
     async def mark_needs_review(self, run_id: uuid.UUID) -> None:
-        """RUNNING -> NEEDS_REVIEW: a step has an unknown outcome and execution must stop."""
-        await self._transition(run_id, RunStatus.RUNNING, RunStatus.NEEDS_REVIEW)
+        """RUNNING -> NEEDS_REVIEW: a step has an unknown outcome and execution must stop.
+        Releases the lease: nobody executes a run that is waiting for a person."""
+        await self._transition(run_id, RunStatus.RUNNING, RunStatus.NEEDS_REVIEW, **_NO_LEASE)
 
-    async def reopen(self, run_id: uuid.UUID) -> None:
-        """NEEDS_REVIEW -> RUNNING, after a person resolved the unknown step."""
-        await self._transition(run_id, RunStatus.NEEDS_REVIEW, RunStatus.RUNNING)
+    async def reopen(self, run_id: uuid.UUID, *, claimable: bool = False) -> None:
+        """NEEDS_REVIEW -> RUNNING, after a person resolved the unknown step.
 
-    async def _transition(self, run_id: uuid.UUID, source: RunStatus, target: RunStatus) -> None:
+        claimable=True also makes the run immediately available to workers (an already-expired
+        lease with no owner). Otherwise it is left for a direct resume_run() call.
+        """
+        extra = {"lease_expires_at": func.now() - _seconds(1)} if claimable else {}
+        await self._transition(run_id, RunStatus.NEEDS_REVIEW, RunStatus.RUNNING, **extra)
+
+    async def _transition(
+        self, run_id: uuid.UUID, source: RunStatus, target: RunStatus, **values: Any
+    ) -> None:
         result = await self._session.execute(
             update(WorkflowRun)
             .where(WorkflowRun.run_id == run_id, WorkflowRun.status == source.value)
-            .values(status=target.value)
+            .values(status=target.value, **values)
             .returning(WorkflowRun.run_id)
         )
         if result.scalar_one_or_none() is None:
@@ -117,7 +261,7 @@ class RunRepository:
         result = await self._session.execute(
             update(WorkflowRun)
             .where(WorkflowRun.run_id == run_id, WorkflowRun.status == RunStatus.RUNNING.value)
-            .values(status=status.value, completed_at=func.now(), **values)
+            .values(status=status.value, completed_at=func.now(), **_NO_LEASE, **values)
             .returning(WorkflowRun.run_id)
         )
         if result.scalar_one_or_none() is None:
@@ -237,4 +381,40 @@ class IdempotencyRepository:
             .where(IdempotencyRecord.run_id == run_id)
             .order_by(IdempotencyRecord.created_at, IdempotencyRecord.idempotency_key)
         )
+        return list(result.scalars())
+
+
+class WorkerRepository:
+    """Worker registry. Informational: nothing here decides who may execute a run."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def register(self, worker_id: str, hostname: str, pid: int) -> None:
+        stmt = pg_insert(Worker).values(worker_id=worker_id, hostname=hostname, pid=pid, status="ACTIVE")
+        await self._session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["worker_id"],
+                set_={
+                    "hostname": hostname,
+                    "pid": pid,
+                    "status": "ACTIVE",
+                    "started_at": func.now(),
+                    "last_heartbeat_at": func.now(),
+                },
+            )
+        )
+
+    async def touch(self, worker_id: str) -> None:
+        await self._session.execute(
+            update(Worker).where(Worker.worker_id == worker_id).values(last_heartbeat_at=func.now())
+        )
+
+    async def mark_stopped(self, worker_id: str) -> None:
+        await self._session.execute(
+            update(Worker).where(Worker.worker_id == worker_id).values(status="STOPPED")
+        )
+
+    async def list_workers(self) -> list[Worker]:
+        result = await self._session.execute(select(Worker).order_by(Worker.started_at, Worker.worker_id))
         return list(result.scalars())

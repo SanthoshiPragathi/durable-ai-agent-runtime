@@ -22,7 +22,11 @@ from app.engine.errors import DurableRuntimeError
 
 
 def load_workflow_modules() -> None:
-    modules = ["app.examples.simple_workflow", "app.examples.refund_workflow"]
+    modules = [
+        "app.examples.simple_workflow",
+        "app.examples.refund_workflow",
+        "app.examples.slow_workflow",
+    ]
     modules += [m.strip() for m in os.environ.get("DURABLE_WORKFLOW_MODULES", "").split(",") if m.strip()]
     for module in modules:
         importlib.import_module(module)

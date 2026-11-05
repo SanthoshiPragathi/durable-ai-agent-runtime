@@ -2,10 +2,12 @@
 
 A fault-tolerant execution engine for AI workflows: crash-safe, replayable, and forkable.
 
-> **Status: Phase 3 (idempotency).** Workflows run, every step is recorded in PostgreSQL, a crashed run
-> resumes from its history, and calls with real-world effects (payments, emails) are protected against
-> duplicates where the external system allows it. Worker processes, leases, timers, signals and forking are
-> **not implemented yet** (see the roadmap). This README is updated at every milestone so it never claims more than the code does.
+> **Status: Phase 4 (workers, leases, fencing).** Workflows run, every step is recorded in PostgreSQL, a
+> crashed run resumes from its history, calls with real-world effects (payments, emails) are protected against
+> duplicates where the external system allows it, and several worker processes share the work: a dead worker's
+> runs are taken over automatically and a frozen "zombie" worker cannot write to a run it lost. Timers,
+> signals and forking are **not implemented yet** (see the roadmap). This README is updated at every
+> milestone so it never claims more than the code does.
 
 ## The problem
 
@@ -25,7 +27,8 @@ This runtime aims for **at-least-once execution with idempotent external effects
 It does *not* claim universal exactly-once execution, which is impossible in general.
 
 - Idempotency only prevents duplicates if the external service honors the idempotency key.
-- Fencing tokens protect database writes only, not calls a stale worker makes to external APIs.
+- Fencing tokens protect database writes only, not calls a stale worker makes to external APIs
+  (idempotency keys cover those; see [docs/workers-and-leases.md](docs/workers-and-leases.md)).
 - When an outcome is uncertain and the tool is not idempotent, the step is recorded as
   `OUTCOME_UNKNOWN` and routed to reconciliation instead of being blindly retried.
 
@@ -64,7 +67,7 @@ docs/             design documents
 scripts/          helper scripts
 ```
 
-## What works today (Phase 3)
+## What works today (Phase 4)
 
 ```python
 from app.sdk import workflow
@@ -94,16 +97,21 @@ async def refund(ctx, order_id: str):
 - **Independent ledgers:** the fake payment and email services keep their own books in a separate database,
   so tests compare the runtime's history against what the "outside world" actually recorded.
 - The event log is append-only (enforced by a PostgreSQL trigger) with per-run sequence numbers.
+- **Workers** (`python -m app.engine.worker`) claim runs with `FOR UPDATE SKIP LOCKED`, hold a **lease** they
+  renew with a heartbeat, and write every event with a **fencing token**. If a worker dies, its lease
+  expires and another worker resumes the run from the history. If a worker is merely frozen and wakes up
+  later, the database rejects its writes (`StaleLeaseError`) and it stands down.
 
 **Guarantee, stated honestly:** at-least-once execution with duplicate protection where the external system
 supports idempotency keys (or can be asked via a verify hook). It does not claim exactly-once.
 
-**Not yet:** nothing resumes runs automatically, and `resume_run` must only be called when the old executor
-is dead (worker processes, leases and fencing are Phase 4). Execution still happens inside the API process.
-Idempotency keys are per run and step, so two separate runs for the same order are two operations.
-`ctx.sleep/wait_for_signal/fork` do not exist yet.
+**Not yet:** a run cannot wait for a timer or a signal (`ctx.sleep`, `ctx.wait_for_signal`) and cannot be forked.
+Idempotency keys are per run and step, so two separate runs for the same order are two operations. Fencing
+cannot recall an external call a stale worker already started. A run executed directly with
+`execute_run`/`resume_run` (not by a worker) is not recovered automatically. One run at a time per worker process.
 
-See [docs/idempotency.md](docs/idempotency.md) (decision table, review path, what is and is not protected,
+See [docs/workers-and-leases.md](docs/workers-and-leases.md) (claiming, leases, fencing, failure table),
+[docs/idempotency.md](docs/idempotency.md) (decision table, review path, what is and is not protected,
 the bug the property test found), [docs/replay-and-recovery.md](docs/replay-and-recovery.md),
 [docs/database-design.md](docs/database-design.md) and [docs/workflow-lifecycle.md](docs/workflow-lifecycle.md).
 
@@ -112,11 +120,15 @@ the bug the property test found), [docs/replay-and-recovery.md](docs/replay-and-
 ```bash
 python scripts/demo_crash_recovery.py     # kill a worker mid-run, resume in a new process
 python scripts/demo_duplicate_refund.py   # worker dies after the refund succeeded: still ONE refund
+python scripts/demo_multi_worker.py       # three worker processes share twelve runs, each run once
+python scripts/demo_zombie_worker.py      # a frozen worker wakes up after a takeover and is rejected
 ```
 
 The second demo kills the worker after the payment service processed the refund but before the runtime
 recorded it, resumes in a new process, and shows the payment service's own ledger: one refund, the same
-`refund_id` before and after.
+`refund_id` before and after. The fourth freezes a worker for 8 seconds right after its refund succeeded; a
+second worker takes the run over once the lease lapses (fencing token 2) and finishes it; when the first
+worker thaws, its write is rejected, the history is unchanged and the ledger still shows one refund.
 
 ## Getting started
 
@@ -134,6 +146,15 @@ uvicorn app.api.main:app --reload
 # interactive docs: http://localhost:8000/docs
 ```
 
+By default the API process executes runs itself (`EXECUTION_MODE=inline`). To use worker processes instead:
+
+```bash
+EXECUTION_MODE=workers uvicorn app.api.main:app --reload     # Windows PowerShell: $env:EXECUTION_MODE="workers"
+python -m app.engine.worker --id worker-1                    # in another terminal; start as many as you like
+# or: docker compose up -d --build --scale worker=3
+curl localhost:8000/workers                                  # who is registered and alive
+```
+
 Try it:
 
 ```bash
@@ -149,7 +170,8 @@ curl localhost:8000/runs/<run_id>/events      # the recorded timeline
 pytest                         # everything
 pytest -m "not integration"    # unit tests only, no database needed
 pytest -m recovery             # crash/resume tests, including killed worker processes
-pytest -m chaos                # randomized crash test (CHAOS_EXAMPLES=400 for a longer run)
+pytest -m chaos                # randomized tests (CHAOS_EXAMPLES=400, CHAOS_SEEDS=30 for longer runs)
+pytest tests/concurrency       # claiming, leases, fencing, zombie workers
 ```
 
 Integration tests use the database in `TEST_DATABASE_URL` (default

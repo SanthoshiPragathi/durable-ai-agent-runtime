@@ -1,9 +1,14 @@
 """Creating, executing and resuming workflow runs.
 
-Limitations (all addressed in later phases, none hidden):
-  * Execution happens in whatever process calls execute_run()/resume_run(); there are no worker
-    processes or leases yet (Phase 4). resume_run() must only be called when the previous
-    executor is known to be dead: two live executors of one run would both execute steps.
+Two ways to execute a run:
+  * Directly: execute_run()/resume_run() in whatever process calls them. Nothing proves the
+    previous executor is dead, so resume_run() must only be called when it is known to be, and it
+    refuses a run that carries a worker lease.
+  * Through workers (engine/worker.py): a worker claims a run with a lease and a fencing token,
+    renews the lease while it works, and every write is rejected once another worker has taken the
+    run over. This is the safe way to run more than one process. Workers use _drive() below.
+
+Remaining limitations (addressed in later phases, none hidden):
   * A plain ctx.step that was STARTED but has no recorded outcome (the worker died mid-step) is
     run again, so only repeat-safe work belongs in ctx.step. A ctx.effect step is reconciled
     instead: retried with its idempotency key, checked with its verify hook, or parked as
@@ -23,12 +28,14 @@ from app.engine.errors import (
     NonDeterminismError,
     OutcomeUnknownError,
     RunNotFoundError,
+    StaleLeaseError,
     WorkflowVersionMismatchError,
     format_error,
 )
 from app.engine.execution_context import DbStepRecorder
 from app.engine.failpoints import failpoint
 from app.engine.hashing import normalize_json
+from app.engine.lease import Fence
 from app.engine.replay import ReplayHistory, StepStatus
 from app.integrations.llm import LLMProvider, get_llm_provider
 from app.sdk.context import WorkflowContext
@@ -101,6 +108,11 @@ async def resume_run(
             raise InvalidRunStateError(
                 f"run {run_id} is {run.status}; only RUNNING runs can be resumed"
             )
+        if run.lease_owner is not None:
+            raise InvalidRunStateError(
+                f"run {run_id} is leased to worker {run.lease_owner!r}; resume_run() would race it. "
+                "Let a worker recover the run once its lease expires."
+            )
         definition = registry.get(run.workflow_name)
         if definition.version != run.workflow_version:
             raise WorkflowVersionMismatchError(
@@ -137,6 +149,7 @@ async def resolve_unknown_step(
     result: Any = None,
     message: str | None = None,
     resolved_by: str = "operator",
+    make_claimable: bool = False,
 ) -> WorkflowRun:
     """Record a reviewer's answer for a step whose outcome was unknown, and reopen the run.
 
@@ -144,7 +157,8 @@ async def resolve_unknown_step(
     outcome="failed"        the effect did not happen and should not be retried; the step fails
     outcome="not_executed"  the effect did NOT happen; it is safe to run the step now
 
-    The run moves NEEDS_REVIEW -> RUNNING; call resume_run to continue it. The decision is recorded
+    The run moves NEEDS_REVIEW -> RUNNING. Call resume_run to continue it directly, or pass
+    make_claimable=True to let a worker pick it up. The decision is recorded
     as a STEP_RESOLVED event (with who made it) so the history stays complete and replayable.
     """
     if outcome not in RESOLUTIONS:
@@ -182,9 +196,10 @@ async def resolve_unknown_step(
                 await ops.set_status(key, IdempotencyStatus.RECONCILED, normalized)
             elif outcome == "failed":
                 await ops.set_status(key, IdempotencyStatus.FAILED)
-        await runs.reopen(run_id)
+        await runs.reopen(run_id, claimable=make_claimable)
         reopened = await runs.get_run(run_id)
         assert reopened is not None
+        await session.refresh(reopened)  # the UPDATE used SQL expressions; reload before the session closes
     return reopened
 
 
@@ -195,10 +210,11 @@ async def _drive(
     input_data: dict[str, Any],
     history: ReplayHistory,
     llm_provider: LLMProvider | None,
+    fence: Fence | None = None,
 ) -> WorkflowRun:
     ctx = WorkflowContext(
         run_id,
-        DbStepRecorder(run_id, session_factory),
+        DbStepRecorder(run_id, session_factory, fence),
         history,
         llm=llm_provider or get_llm_provider(),
     )
@@ -207,6 +223,10 @@ async def _drive(
         ctx.verify_replay_complete()
     except Exception as exc:
         halt = ctx.halt
+        if isinstance(halt, StaleLeaseError) or isinstance(exc, StaleLeaseError):
+            # Another worker owns the run now. Record nothing (every write would be rejected anyway)
+            # and let the worker stand down.
+            raise (halt if isinstance(halt, StaleLeaseError) else exc) from None
         if isinstance(halt, NonDeterminismError):
             # The code no longer matches the history. This is not the workflow failing, so the run
             # stays RUNNING for someone to fix the code and resume; it is never silently "failed".
@@ -218,10 +238,10 @@ async def _drive(
             logger.warning("run needs review", extra={"run_id": str(run_id), "error": str(halt)})
         else:
             logger.info("workflow run failed", extra={"run_id": str(run_id), "error": repr(exc)})
-            await _record_failure(session_factory, run_id, exc)
+            await _record_failure(session_factory, run_id, exc, fence)
     else:
         failpoint("before_workflow_completed")
-        await _record_success(session_factory, run_id, result)
+        await _record_success(session_factory, run_id, result, fence)
 
     async with session_factory() as session:
         final = await RunRepository(session).get_run(run_id)
@@ -229,9 +249,13 @@ async def _drive(
     return final
 
 
-async def _record_success(session_factory: SessionFactory, run_id: uuid.UUID, result: Any) -> None:
+async def _record_success(
+    session_factory: SessionFactory, run_id: uuid.UUID, result: Any, fence: Fence | None = None
+) -> None:
     # Event and status change commit together or not at all.
     async with session_factory() as session, session.begin():
+        if fence is not None:
+            await RunRepository(session).check_fence(run_id, fence)
         await EventRepository(session).append(
             run_id, EventType.WORKFLOW_COMPLETED, result_data=result
         )
@@ -239,10 +263,15 @@ async def _record_success(session_factory: SessionFactory, run_id: uuid.UUID, re
 
 
 async def _record_failure(
-    session_factory: SessionFactory, run_id: uuid.UUID, exc: BaseException
+    session_factory: SessionFactory,
+    run_id: uuid.UUID,
+    exc: BaseException,
+    fence: Fence | None = None,
 ) -> None:
     details = format_error(exc)
     async with session_factory() as session, session.begin():
+        if fence is not None:
+            await RunRepository(session).check_fence(run_id, fence)
         await EventRepository(session).append(run_id, EventType.WORKFLOW_FAILED, result_data=details)
         await RunRepository(session).mark_failed(
             run_id, f"{details['error_type']}: {details['message']}"

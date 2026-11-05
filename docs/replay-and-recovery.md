@@ -105,9 +105,10 @@ unset, which is always the case in normal operation, nothing happens.
 - **At-least-once, not exactly-once.** A plain `ctx.step` in the in-doubt window runs again, so it must
   be repeat-safe. Calls with side effects use `ctx.effect` (Phase 3: idempotency keys, verify hooks,
   `OUTCOME_UNKNOWN`), which is only as safe as the external system allows.
-- **Nothing resumes runs automatically yet.** `resume_run` is called by a person or script, and it
-  must only be called when the old executor is known to be dead: two live executors of one run
-  would both run steps. Phase 4 adds worker processes, leases and fencing so this is automatic and safe.
+- **Direct `resume_run` still needs a dead executor.** Called by a person or script, it must only be used
+  when the old executor is known to be dead. Worker processes (Phase 4) make recovery automatic and safe:
+  a worker takes over a run only after its lease expires, and fencing tokens reject the old executor's
+  writes if it was merely slow. See [workers-and-leases.md](workers-and-leases.md).
 - Replay re-runs the whole workflow function, so very long histories cost time (no snapshots yet).
 - Sequential steps only.
 - JSONB does not preserve object key order, so a replayed object may list keys differently.
@@ -118,4 +119,5 @@ unset, which is always the case in normal operation, nothing happens.
 python scripts/demo_crash_recovery.py            # kills a worker, resumes in a new process
 pytest -m recovery                               # all crash/resume tests
 python -m app.engine.runner resume <run_id>      # resume one run by hand
+python -m app.engine.worker --drain              # or let a worker recover it (waits for the lease)
 ```

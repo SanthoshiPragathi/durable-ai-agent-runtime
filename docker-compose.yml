@@ -1,4 +1,5 @@
-# Phase 0: PostgreSQL + API. Worker services are added in Phase 4.
+# PostgreSQL, the API and worker processes.
+#   docker compose up -d --build --scale worker=3     # three workers sharing the runs
 services:
   postgres:
     image: postgres:16
@@ -22,8 +23,21 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://durable:durable@postgres:5432/durable
       SERVICES_DATABASE_URL: postgresql+asyncpg://durable:durable@postgres:5432/fake_services
+      EXECUTION_MODE: workers   # the API records runs; the worker service executes them
     ports:
       - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.engine.worker"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://durable:durable@postgres:5432/durable
+      SERVICES_DATABASE_URL: postgresql+asyncpg://durable:durable@postgres:5432/fake_services
+      LEASE_DURATION_SECONDS: "15"
+      HEARTBEAT_INTERVAL_SECONDS: "5"
     depends_on:
       postgres:
         condition: service_healthy
