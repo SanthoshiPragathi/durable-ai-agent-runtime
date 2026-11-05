@@ -90,6 +90,18 @@ class LLMConfigurationError(DurableRuntimeError):
     """No usable LLM provider is configured."""
 
 
+class RunSuspendedError(DurableRuntimeError):
+    """Raised inside the workflow when it reaches a wait (ctx.sleep, ctx.wait_for_signal) that is not
+    over yet. The run has been parked as WAITING and released its lease; the runtime catches this, it is
+    not a failure. Like the other halting errors it is also stored on the context, so a workflow that
+    swallows it still cannot run on."""
+
+    def __init__(self, step_name: str, kind: str) -> None:
+        super().__init__(f"run is waiting at step {step_name!r} ({kind})")
+        self.step_name = step_name
+        self.kind = kind
+
+
 class StaleLeaseError(DurableRuntimeError):
     """A write was attempted with an out-of-date fencing token: the run has been claimed by another
     worker (or finished) since this worker got it. The write is rejected and nothing is recorded.

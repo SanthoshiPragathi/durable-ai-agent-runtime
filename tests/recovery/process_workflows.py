@@ -58,3 +58,13 @@ async def legacy_refund_pipeline(ctx, order_id: str):
         "process_refund", payments.refund, order_id, 2500, reference, idempotent=False
     )
     return {"refund_id": refund["refund_id"]}
+
+
+@workflow(name="waiting_pipeline")
+async def waiting_pipeline(ctx, order_id: str):
+    """Do some work, wait for a signal, do the rest. Every step writes to the ledger file."""
+    order = await ctx.step("fetch_order", fetch_order, order_id)
+    answer = await ctx.wait_for_signal("wait", signal="go")
+    refund = await ctx.step("process_refund", process_refund, order["amount"])
+    await ctx.step("send_email", send_email, refund["refund_id"])
+    return {"order_id": order_id, "payload": answer["payload"]}

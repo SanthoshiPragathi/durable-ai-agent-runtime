@@ -29,6 +29,7 @@ class RunOut(BaseModel):
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
     fencing_token: int = 0
+    waiting_signal: str | None = None
 
 
 class WorkerOut(BaseModel):
@@ -102,3 +103,38 @@ class ExternalOperationOut(BaseModel):
     result_data: Any = None
     created_at: datetime
     updated_at: datetime
+
+
+class SignalIn(BaseModel):
+    payload: Any = None
+    idempotency_key: str | None = Field(default=None, max_length=200)
+
+
+class SignalReceiptOut(BaseModel):
+    signal_id: int
+    duplicate: bool
+    woke_run: bool
+
+
+class SignalOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    signal_id: int
+    name: str
+    payload: Any = None
+    idempotency_key: str | None = None
+    received_at: datetime
+    consumed_by_step: str | None = None
+    consumed_at: datetime | None = None
+
+
+class TimerOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    timer_id: int
+    step_name: str
+    kind: str
+    fire_at: datetime
+    status: str
+    created_at: datetime
+    fired_at: datetime | None = None

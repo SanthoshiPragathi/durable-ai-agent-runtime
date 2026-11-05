@@ -28,6 +28,7 @@ from app.engine.errors import (
     NonDeterminismError,
     OutcomeUnknownError,
     RunNotFoundError,
+    RunSuspendedError,
     StaleLeaseError,
     WorkflowVersionMismatchError,
     format_error,
@@ -232,7 +233,11 @@ async def _drive(
             # stays RUNNING for someone to fix the code and resume; it is never silently "failed".
             logger.error("replay diverged", extra={"run_id": str(run_id), "error": str(halt)})
             raise halt from None
-        if isinstance(halt, OutcomeUnknownError):
+        if isinstance(halt, RunSuspendedError):
+            # The recorder parked the run as WAITING and released its lease. Not a failure: a timer
+            # or a signal will make it claimable again and a worker will replay it from the history.
+            logger.info("run waiting", extra={"run_id": str(run_id), "step": halt.step_name})
+        elif isinstance(halt, OutcomeUnknownError):
             # The recorder already moved the run to NEEDS_REVIEW. Nothing more executes until a
             # person resolves the step; this is not a failed workflow either.
             logger.warning("run needs review", extra={"run_id": str(run_id), "error": str(halt)})

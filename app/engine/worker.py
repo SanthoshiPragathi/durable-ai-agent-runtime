@@ -47,6 +47,7 @@ from app.engine.failpoints import failpoint
 from app.engine.lease import Fence
 from app.engine.replay import ReplayHistory, StepStatus
 from app.engine.runtime import _drive
+from app.engine.timers import fire_due_timers
 from app.integrations.llm import LLMProvider
 from app.sdk.workflow import registry
 
@@ -235,7 +236,8 @@ class Worker:
     # ---- loops ----------------------------------------------------------------------------
 
     async def run_once(self) -> bool:
-        """Claim and execute at most one run. Returns True if a run was claimed."""
+        """Fire due timers, then claim and execute at most one run. True if a run was claimed."""
+        await fire_due_timers(self.session_factory)
         claim = await self.claim_one()
         if claim is None:
             return False

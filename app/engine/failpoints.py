@@ -23,6 +23,8 @@ Names used so far:
     after_step_started            key=step name, STEP_STARTED recorded, step not yet run
     before_step_completed         key=step name, step function RAN, result not yet recorded
     after_step_completed          key=step name, STEP_COMPLETED recorded
+    before_wait_recorded          key=step name, a sleep/signal wait is about to be evaluated
+    after_wait_recorded           key=step name, the wait was recorded (completed, or run parked)
     before_workflow_completed     all steps done, WORKFLOW_COMPLETED not yet recorded
 """
 

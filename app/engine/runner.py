@@ -5,7 +5,8 @@
 
 Workflow modules to import are listed in DURABLE_WORKFLOW_MODULES (comma separated); the example
 workflows are always loaded. Prints one JSON line. Exit codes: 0 COMPLETED, 1 FAILED workflow, 2 runtime error
-(e.g. NonDeterminismError), 3 NEEDS_REVIEW (a step's outcome is unknown). A failpoint crash exits 77.
+(e.g. NonDeterminismError), 3 NEEDS_REVIEW (a step's outcome is unknown),
+4 WAITING (parked at a sleep or signal wait). A failpoint crash exits 77.
 """
 
 import argparse
@@ -26,6 +27,7 @@ def load_workflow_modules() -> None:
         "app.examples.simple_workflow",
         "app.examples.refund_workflow",
         "app.examples.slow_workflow",
+        "app.examples.leave_approval_workflow",
     ]
     modules += [m.strip() for m in os.environ.get("DURABLE_WORKFLOW_MODULES", "").split(",") if m.strip()]
     for module in modules:
@@ -45,7 +47,7 @@ async def _run(action: str, run_id: uuid.UUID) -> int:
     finally:
         await session_factory.kw["bind"].dispose()
     print(json.dumps({"run_id": str(run.run_id), "status": run.status, "result": run.result_data}))
-    return {"COMPLETED": 0, "NEEDS_REVIEW": 3}.get(run.status, 1)
+    return {"COMPLETED": 0, "NEEDS_REVIEW": 3, "WAITING": 4}.get(run.status, 1)
 
 
 def main(argv: list[str] | None = None) -> int:
