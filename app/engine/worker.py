@@ -162,15 +162,21 @@ class Worker:
         return run
 
     async def _begin(self, claim: Claim) -> ReplayHistory:
-        """Record that this worker started (or took over) the run, and load the history to replay."""
+        """Record that this worker started (or took over) the run, and load the history to replay.
+
+        STARTED versus RESUMED is decided from the history itself, not from the run's status at claim
+        time: a worker can be taken over right after claiming, before it wrote anything, and then the
+        next worker is the one that really starts the run.
+        """
         async with self.session_factory() as session, session.begin():
             runs, events = RunRepository(session), EventRepository(session)
             await runs.check_fence(claim.run_id, claim.fence)
+            recorded = await events.list_events(claim.run_id)
             info = {"worker_id": claim.fence.worker_id, "fencing_token": claim.fence.token}
-            if not claim.resumed:
+            if not any(e.event_type == EventType.WORKFLOW_STARTED.value for e in recorded):
                 await events.append(claim.run_id, EventType.WORKFLOW_STARTED, result_data=info)
                 return ReplayHistory()
-            history = ReplayHistory.from_events(await events.list_events(claim.run_id))
+            history = ReplayHistory.from_events(recorded)
             await events.append(
                 claim.run_id,
                 EventType.WORKFLOW_RESUMED,

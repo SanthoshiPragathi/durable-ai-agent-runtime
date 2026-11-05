@@ -375,3 +375,22 @@ async def test_a_worker_frozen_between_recording_a_step_and_running_it_does_not_
     await asyncio.wait_for(task, timeout=5)
     assert ran == ["acted"]  # the zombie did not run it a second time
     assert w1.lost_leases == 1
+
+
+async def test_a_run_taken_over_before_anything_was_written_is_started_not_resumed(
+    session_factory: SessionFactory,
+) -> None:
+    """w1 claims the run but loses it before writing a single event. w2, which claims a RUNNING
+    run, is the one that really starts it, so the history must begin with WORKFLOW_STARTED."""
+    _register_two_step()
+    run = await runtime.create_run(session_factory, "two_step", {"n": 1})
+    assert await make_worker(session_factory, "w1").claim_one() is not None  # claimed, then silence
+    await _expire(session_factory, run.run_id)
+
+    assert await make_worker(session_factory, "w2").run_until_idle() == 1
+
+    events = await _events(session_factory, run.run_id)
+    assert events[0].event_type == "WORKFLOW_STARTED"
+    assert events[0].result_data == {"worker_id": "w2", "fencing_token": 2}
+    assert "WORKFLOW_RESUMED" not in [e.event_type for e in events]
+    assert (await _run(session_factory, run.run_id)).status == "COMPLETED"
