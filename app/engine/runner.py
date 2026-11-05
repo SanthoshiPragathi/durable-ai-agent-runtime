@@ -28,6 +28,7 @@ def load_workflow_modules() -> None:
         "app.examples.refund_workflow",
         "app.examples.slow_workflow",
         "app.examples.leave_approval_workflow",
+        "app.examples.bench_workflow",
     ]
     modules += [m.strip() for m in os.environ.get("DURABLE_WORKFLOW_MODULES", "").split(",") if m.strip()]
     for module in modules:

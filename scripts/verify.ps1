@@ -16,7 +16,11 @@ if (Test-Path ".venv\Scripts\Activate.ps1") { . .venv\Scripts\Activate.ps1 }
 Step "Start PostgreSQL" { docker compose up -d postgres; Start-Sleep -Seconds 8 }
 Step "Migrate" { alembic upgrade head }
 Step "Lint (ruff)" { ruff check . }
-Step "All tests (about 4 minutes)" { python -m pytest -q }
+# Lets tests/chaos/test_postgres_restart.py really restart the database in Docker mid-run.
+$env:PG_RESTART_CMD = "docker compose restart postgres"
+Step "All tests incl. PostgreSQL restart chaos (about 5 minutes)" { python -m pytest -q }
+Remove-Item Env:PG_RESTART_CMD
+Step "Benchmarks" { python scripts\benchmark.py }
 foreach ($demo in "demo_crash_recovery", "demo_duplicate_refund", "demo_multi_worker",
                   "demo_zombie_worker", "demo_durable_waiting", "demo_forking") {
     Step "Demo: $demo" { python "scripts\$demo.py" }
