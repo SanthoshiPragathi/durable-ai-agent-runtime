@@ -55,6 +55,9 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let selected = location.hash.slice(1) || null;
+// The detail panel is rebuilt from scratch on every refresh, so anything the user produced there (a diff
+// result) must live here, outside the DOM, and be drawn back in. It belongs to one run: select() drops it.
+let diffState = null; // {runId, otherId, data} or {runId, otherId, error}
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const j = (v) => esc(JSON.stringify(v));
 const short = (id) => esc(String(id).slice(0, 8));
@@ -86,7 +89,20 @@ async function loadWorkers() {
   ).join("") || '<tr><td class="mute">no workers registered</td></tr>';
 }
 
-async function select(id) { selected = id; location.hash = id; await Promise.all([loadRuns(), loadDetail()]); }
+async function select(id) {
+  if (id !== selected) diffState = null; // a comparison belongs to the run it was made from
+  selected = id; location.hash = id;
+  await Promise.all([loadRuns(), loadDetail()]);
+}
+
+function diffHtml() {
+  if (!diffState || diffState.runId !== selected) return "";
+  if (diffState.error) return `<div class="diff-diff">${esc(diffState.error)}</div>`;
+  const d = diffState.data;
+  return `<div class="mute">first divergence: <b>${esc(d.first_divergence || "none")}</b></div>` +
+    d.steps.map((s) => `<div class="${s.identical ? "diff-same" : "diff-diff"}">${s.identical ? "same   " : "differs"} ${esc(s.step_name)}
+      <span class="mute">${j(s.result_a)} &rarr; ${j(s.result_b)}</span></div>`).join("");
+}
 
 async function loadDetail() {
   if (!selected) return;
@@ -120,8 +136,8 @@ async function loadDetail() {
     <div class="row"><select id="forkStep">${steps.map((s) => `<option>${esc(s)}</option>`).join("")}</select>
       <input id="forkOverride" placeholder="override result JSON (optional)" size="24">
       <button id="forkBtn" class="alt">Fork from step</button></div>
-    <div class="row"><input id="diffId" placeholder="other run id" size="38"><button id="diffBtn" class="alt">Diff</button></div>
-    <div id="diffOut"></div>`;
+    <div class="row"><input id="diffId" placeholder="other run id" size="38" value="${esc(diffState && diffState.runId === selected ? diffState.otherId : "")}"><button id="diffBtn" class="alt">Diff</button></div>
+    <div id="diffOut">${diffHtml()}</div>`;
   $("sigBtn").onclick = async () => {
     try {
       const raw = $("sigPayload").value.trim();
@@ -140,12 +156,13 @@ async function loadDetail() {
     } catch (e) { say(e.message); }
   };
   $("diffBtn").onclick = async () => {
-    try {
-      const d = await api(`/runs/${selected}/diff/${$("diffId").value.trim()}`);
-      $("diffOut").innerHTML = `<div class="mute">first divergence: <b>${esc(d.first_divergence || "none")}</b></div>` +
-        d.steps.map((s) => `<div class="${s.identical ? "diff-same" : "diff-diff"}">${s.identical ? "same   " : "differs"} ${esc(s.step_name)}
-          <span class="mute">${j(s.result_a)} &rarr; ${j(s.result_b)}</span></div>`).join("");
-    } catch (e) { say(e.message); }
+    const runId = selected, otherId = $("diffId").value.trim();
+    let next;
+    try { next = {runId, otherId, data: await api(`/runs/${runId}/diff/${otherId}`)}; }
+    catch (e) { next = {runId, otherId, error: e.message}; }
+    if (runId !== selected) return; // the user moved to another run while the request was in flight
+    diffState = next;
+    if ($("diffOut")) $("diffOut").innerHTML = diffHtml();
   };
 }
 
