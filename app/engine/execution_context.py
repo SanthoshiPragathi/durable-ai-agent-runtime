@@ -15,12 +15,18 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import EventType, IdempotencyStatus, RunStatus
-from app.database.repositories import EventRepository, IdempotencyRepository, RunRepository
+from app.database.models import EventType, IdempotencyStatus, RunStatus, TimerStatus
+from app.database.repositories import (
+    EventRepository,
+    IdempotencyRepository,
+    RunRepository,
+    WaitRepository,
+)
 from app.database.session import SessionFactory
 from app.engine.errors import format_error
 from app.engine.failpoints import failpoint
 from app.engine.lease import Fence
+from app.sdk.context import WaitOutcome
 
 
 class DbStepRecorder:
@@ -136,3 +142,63 @@ class DbStepRecorder:
         async with self._session_factory() as session, session.begin():
             await self._guard(session)
             await IdempotencyRepository(session).add_attempt(idempotency_key)
+
+    async def wait(
+        self, step_name: str, kind: str, *, signal_name: str | None, seconds: float | None
+    ) -> WaitOutcome:
+        """Evaluate a sleep / signal wait and either complete it or park the run, in ONE transaction
+        that holds the run's row lock.
+
+        The lock is what prevents a lost wakeup: send_signal and the timer firer take the same lock,
+        so a signal either committed before this transaction (we see it and complete), or it arrives
+        after we committed WAITING (it sees WAITING and wakes the run). There is no gap between.
+        Order of checks: a stored signal wins over an expired timeout.
+        """
+        failpoint("before_wait_recorded", step_name)
+        async with self._session_factory() as session, session.begin():
+            await self._guard(session)  # with a fence this already locked the run row
+            runs, waits, events = RunRepository(session), WaitRepository(session), EventRepository(session)
+            await runs.lock_run(self._run_id)
+
+            timer = None
+            due = False
+            if seconds is not None:
+                timer_kind = "SLEEP" if kind == "sleep" else "SIGNAL_TIMEOUT"
+                timer, due = await waits.ensure_timer(self._run_id, step_name, timer_kind, seconds)
+
+            result: Any = None
+            done = False
+            if signal_name is not None:
+                signal = await waits.oldest_unconsumed(self._run_id, signal_name)
+                if signal is not None:
+                    await waits.consume(signal.signal_id, step_name)
+                    if timer is not None:
+                        await waits.set_timer_status(timer, TimerStatus.CANCELLED)
+                    result = {"received": True, "payload": signal.payload, "signal_id": signal.signal_id}
+                    done = True
+            if not done and timer is not None and due:
+                await waits.set_timer_status(timer, TimerStatus.FIRED)
+                if kind == "sleep":
+                    result = {"fire_at": timer.fire_at.isoformat()}
+                else:
+                    result = {"received": False, "timed_out": True}
+                done = True
+
+            if done:
+                await events.append(
+                    self._run_id, EventType.STEP_COMPLETED, step_name=step_name, result_data=result
+                )
+            else:
+                await events.append(
+                    self._run_id,
+                    EventType.WORKFLOW_WAITING,
+                    step_name=step_name,
+                    result_data={
+                        "kind": kind,
+                        "signal": signal_name,
+                        "fire_at": timer.fire_at.isoformat() if timer is not None else None,
+                    },
+                )
+                await runs.mark_waiting(self._run_id, signal_name)
+        failpoint("after_wait_recorded", step_name)
+        return WaitOutcome(done, result)

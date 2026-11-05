@@ -30,12 +30,22 @@ from app.engine.errors import (
     LLMConfigurationError,
     NonDeterminismError,
     OutcomeUnknownError,
+    RunSuspendedError,
     StaleLeaseError,
     StepFailedError,
 )
 from app.engine.hashing import hash_step_input, normalize_json
 from app.engine.replay import RecordedStep, ReplayHistory, StepStatus
 from app.integrations.llm.base import LLMProvider
+
+
+@dataclass(frozen=True)
+class WaitOutcome:
+    """What the recorder reports for a wait. done=True: the wait is over and STEP_COMPLETED is already
+    recorded with `result`. done=False: the run has been parked as WAITING and its lease released."""
+
+    done: bool
+    result: Any = None
 
 
 class StepRecorder(Protocol):
@@ -68,6 +78,10 @@ class StepRecorder(Protocol):
     async def effect_attempt(self, step_name: str, idempotency_key: str) -> None: ...
 
     async def ensure_lease(self) -> None: ...
+
+    async def wait(
+        self, step_name: str, kind: str, *, signal_name: str | None, seconds: float | None
+    ) -> WaitOutcome: ...
 
 
 @dataclass(frozen=True)
@@ -115,7 +129,8 @@ class WorkflowContext:
     @property
     def halt(self) -> DurableRuntimeError | None:
         """Set once the run must stop: replay diverged (NonDeterminismError), a step's outcome is
-        unknown (OutcomeUnknownError) or the worker lost its lease (StaleLeaseError). Every later
+        unknown (OutcomeUnknownError), the worker lost its lease (StaleLeaseError) or the run parked
+        itself at a wait (RunSuspendedError). Every later
         ctx call re-raises it, so workflow code that swallows the exception cannot carry on and do
         real work from a state it cannot trust."""
         return self._halt
@@ -226,6 +241,34 @@ class WorkflowContext:
         record = await self._execute(name, input_hash, call)
         return record["output"]
 
+    async def sleep(self, name: str, seconds: float) -> None:
+        """Pause the run for `seconds`, durably. No worker is held while it sleeps.
+
+        The first time, the run is parked as WAITING with a timer whose deadline is stored in the
+        database (from the database clock); the process may exit. When the timer is due, any worker
+        resumes the run, replays the history and continues after this call. Replaying a sleep that
+        already finished returns immediately. `name` identifies the step like any other step name.
+        """
+        if seconds < 0:
+            raise ValueError("seconds must be >= 0")
+        await self._wait(name, hash_step_input((), {"seconds": seconds}), "sleep", None, seconds)
+
+    async def wait_for_signal(
+        self, name: str, *, signal: str | None = None, timeout: float | None = None
+    ) -> dict[str, Any]:
+        """Wait for a signal sent with POST /runs/{id}/signals/{signal} (or send_signal()).
+
+        Returns {"received": True, "payload": ..., "signal_id": ...} for the oldest unconsumed signal
+        with that name (one that arrived before this call counts), or, if `timeout` seconds pass
+        first, {"received": False, "timed_out": True}. A signal that is already there wins over a
+        timeout that is also due. The answer is recorded, so a replay returns the same one. The run
+        is parked as WAITING in the meantime and holds no worker.
+        """
+        signal_name = signal or name
+        input_hash = hash_step_input((), {"signal": signal_name, "timeout": timeout})
+        result = await self._wait(name, input_hash, "signal", signal_name, timeout)
+        return result
+
     def verify_replay_complete(self) -> None:
         """Called by the runtime when the workflow function returns.
 
@@ -262,6 +305,47 @@ class WorkflowContext:
             # This worker no longer owns the run. Nothing more may happen on its behalf.
             self._halt = exc
             raise
+
+    async def _wait(
+        self, name: str, input_hash: str, kind: str, signal_name: str | None, seconds: float | None
+    ) -> Any:
+        try:
+            return await self._wait_step(name, input_hash, kind, signal_name, seconds)
+        except StaleLeaseError as exc:
+            self._halt = exc
+            raise
+
+    async def _wait_step(
+        self, name: str, input_hash: str, kind: str, signal_name: str | None, seconds: float | None
+    ) -> Any:
+        if self._halt is not None:
+            raise self._halt
+        if name in self._used_step_names:
+            raise DuplicateStepNameError(f"step name {name!r} was already used in this run")
+        self._used_step_names.add(name)
+
+        index = self._step_index
+        self._step_index += 1
+
+        recorded = self._replay.step_at(index)
+        if recorded is not None:
+            self._verify(index, recorded, name, input_hash)
+            if recorded.status == StepStatus.COMPLETED:
+                return recorded.result
+            if recorded.status != StepStatus.IN_DOUBT:
+                self._halt = NonDeterminismError(f"step {name!r} was recorded as a regular step that failed")
+                raise self._halt
+            # IN_DOUBT: an earlier attempt registered the wait and was interrupted (or the run is
+            # being woken). STEP_STARTED is already recorded; evaluate the wait again.
+        else:
+            await self._recorder.step_started(name, input_hash, None)
+
+        outcome = await self._recorder.wait(name, kind, signal_name=signal_name, seconds=seconds)
+        if outcome.done:
+            return outcome.result
+        # Parked. Stop the workflow here; the runtime sees RunSuspendedError and ends this execution.
+        self._halt = RunSuspendedError(name, kind)
+        raise self._halt
 
     async def _execute_step(
         self,

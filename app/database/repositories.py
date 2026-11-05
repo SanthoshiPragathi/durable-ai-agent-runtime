@@ -14,10 +14,13 @@ from app.database.models import (
     IdempotencyRecord,
     IdempotencyStatus,
     RunStatus,
+    TimerStatus,
     Worker,
     Workflow,
     WorkflowEvent,
     WorkflowRun,
+    WorkflowSignal,
+    WorkflowTimer,
 )
 from app.engine.errors import (
     DuplicateEventError,
@@ -211,13 +214,66 @@ class RunRepository:
             )
 
     async def count_unfinished(self) -> int:
-        """Runs that are PENDING or RUNNING (not completed, failed or waiting for a reviewer)."""
-        result = await self._session.execute(
+        """Work a draining worker should still wait for: PENDING or RUNNING runs, plus timers that
+        have not fired (a sleeping run will need a worker once its timer is due). Runs waiting for a
+        signal or a reviewer are not counted: no worker can advance them."""
+        runs = await self._session.execute(
             select(func.count())
             .select_from(WorkflowRun)
             .where(WorkflowRun.status.in_([RunStatus.PENDING.value, RunStatus.RUNNING.value]))
         )
-        return result.scalar_one()
+        timers = await self._session.execute(
+            select(func.count())
+            .select_from(WorkflowTimer)
+            .join(WorkflowRun, WorkflowRun.run_id == WorkflowTimer.run_id)
+            .where(
+                WorkflowTimer.status == TimerStatus.PENDING.value,
+                WorkflowRun.status == RunStatus.WAITING.value,
+            )
+        )
+        return runs.scalar_one() + timers.scalar_one()
+
+    # ---- waiting (Phase 5) -----------------------------------------------------------------
+
+    async def lock_run(self, run_id: uuid.UUID) -> tuple[str, str | None]:
+        """Take the run's row lock and return (status, waiting_signal). Every wait, signal and timer
+        transaction starts here, which is what serialises "suspend" against "wake"."""
+        row = (
+            await self._session.execute(
+                select(WorkflowRun.status, WorkflowRun.waiting_signal)
+                .where(WorkflowRun.run_id == run_id)
+                .with_for_update()
+            )
+        ).first()
+        if row is None:
+            raise RunNotFoundError(f"run {run_id} does not exist")
+        return row[0], row[1]
+
+    async def mark_waiting(self, run_id: uuid.UUID, waiting_signal: str | None) -> None:
+        """RUNNING -> WAITING. Releases the lease: a waiting run belongs to no worker."""
+        await self._transition(
+            run_id, RunStatus.RUNNING, RunStatus.WAITING, waiting_signal=waiting_signal, **_NO_LEASE
+        )
+
+    async def wake(self, run_id: uuid.UUID, *, signal_name: str | None = None) -> bool:
+        """WAITING -> RUNNING with an already expired lease and no owner, i.e. claimable by any
+        worker, which replays the history (WORKFLOW_RESUMED). With signal_name, only wakes a run that
+        is waiting for that signal. Returns whether the run was woken."""
+        conditions = [WorkflowRun.run_id == run_id, WorkflowRun.status == RunStatus.WAITING.value]
+        if signal_name is not None:
+            conditions.append(WorkflowRun.waiting_signal == signal_name)
+        result = await self._session.execute(
+            update(WorkflowRun)
+            .where(*conditions)
+            .values(
+                status=RunStatus.RUNNING.value,
+                lease_owner=None,
+                lease_expires_at=func.now() - _seconds(1),
+                waiting_signal=None,
+            )
+            .returning(WorkflowRun.run_id)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def mark_running(self, run_id: uuid.UUID) -> bool:
         """PENDING -> RUNNING. Returns False if the run was not PENDING.
@@ -342,6 +398,156 @@ class EventRepository:
             .order_by(WorkflowEvent.sequence_number)
         )
         return list(result.scalars())
+
+
+class WaitRepository:
+    """Timers and signals. Always used inside a transaction that holds the run's row lock."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def ensure_timer(
+        self, run_id: uuid.UUID, step_name: str, kind: str, seconds: float
+    ) -> tuple[WorkflowTimer, bool]:
+        """Create the (run, step) timer once, with fire_at taken from the database clock, and return
+        (timer, is_due). A replay or a restart finds the existing row, so the deadline never moves."""
+        await self._session.execute(
+            pg_insert(WorkflowTimer)
+            .values(
+                run_id=run_id,
+                step_name=step_name,
+                kind=kind,
+                fire_at=func.now() + _seconds(seconds),
+                status=TimerStatus.PENDING.value,
+            )
+            .on_conflict_do_nothing(constraint="uq_workflow_timers_run_step")
+        )
+        row = (
+            await self._session.execute(
+                select(WorkflowTimer, WorkflowTimer.fire_at <= func.now())
+                .where(WorkflowTimer.run_id == run_id, WorkflowTimer.step_name == step_name)
+                .execution_options(populate_existing=True)
+            )
+        ).one()
+        timer, due = row[0], bool(row[1])
+        return timer, due or timer.status == TimerStatus.FIRED.value
+
+    async def set_timer_status(self, timer: WorkflowTimer, status: TimerStatus) -> None:
+        """PENDING -> FIRED/CANCELLED. A timer that already left PENDING is left alone."""
+        values: dict[str, Any] = {"status": status.value}
+        if status == TimerStatus.FIRED:
+            values["fired_at"] = func.now()
+        await self._session.execute(
+            update(WorkflowTimer)
+            .where(
+                WorkflowTimer.timer_id == timer.timer_id,
+                WorkflowTimer.status == TimerStatus.PENDING.value,
+            )
+            .values(**values)
+        )
+
+    async def oldest_unconsumed(self, run_id: uuid.UUID, name: str) -> WorkflowSignal | None:
+        return (
+            await self._session.execute(
+                select(WorkflowSignal)
+                .where(
+                    WorkflowSignal.run_id == run_id,
+                    WorkflowSignal.name == name,
+                    WorkflowSignal.consumed_at.is_(None),
+                )
+                .order_by(WorkflowSignal.signal_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    async def consume(self, signal_id: int, step_name: str) -> None:
+        await self._session.execute(
+            update(WorkflowSignal)
+            .where(WorkflowSignal.signal_id == signal_id, WorkflowSignal.consumed_at.is_(None))
+            .values(consumed_by_step=step_name, consumed_at=func.now())
+        )
+
+    async def add_signal(
+        self, run_id: uuid.UUID, name: str, payload: Any, idempotency_key: str | None
+    ) -> tuple[WorkflowSignal, bool]:
+        """Store a signal. Returns (signal, is_new). A repeated idempotency_key returns the original."""
+        stmt = pg_insert(WorkflowSignal).values(
+            run_id=run_id, name=name, payload=payload, idempotency_key=idempotency_key
+        )
+        if idempotency_key is not None:
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=["run_id", "idempotency_key"],
+                index_where=text("idempotency_key IS NOT NULL"),
+            )
+        signal_id = (
+            await self._session.execute(stmt.returning(WorkflowSignal.signal_id))
+        ).scalar_one_or_none()
+        if signal_id is None:
+            existing = (
+                await self._session.execute(
+                    select(WorkflowSignal).where(
+                        WorkflowSignal.run_id == run_id,
+                        WorkflowSignal.idempotency_key == idempotency_key,
+                    )
+                )
+            ).scalar_one()
+            return existing, False
+        created = (
+            await self._session.execute(
+                select(WorkflowSignal)
+                .where(WorkflowSignal.signal_id == signal_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        return created, True
+
+    async def due_timers(self, limit: int) -> list[tuple[int, uuid.UUID]]:
+        rows = await self._session.execute(
+            select(WorkflowTimer.timer_id, WorkflowTimer.run_id)
+            .where(
+                WorkflowTimer.status == TimerStatus.PENDING.value,
+                WorkflowTimer.fire_at <= func.now(),
+            )
+            .order_by(WorkflowTimer.fire_at, WorkflowTimer.timer_id)
+            .limit(limit)
+        )
+        return [(r[0], r[1]) for r in rows]
+
+    async def lock_due_timer(self, timer_id: int) -> WorkflowTimer | None:
+        """Lock one timer if it is still PENDING and due. SKIP LOCKED: another firer has it."""
+        return (
+            await self._session.execute(
+                select(WorkflowTimer)
+                .where(
+                    WorkflowTimer.timer_id == timer_id,
+                    WorkflowTimer.status == TimerStatus.PENDING.value,
+                    WorkflowTimer.fire_at <= func.now(),
+                )
+                .with_for_update(skip_locked=True)
+            )
+        ).scalar_one_or_none()
+
+    async def list_timers(self, run_id: uuid.UUID) -> list[WorkflowTimer]:
+        return list(
+            (
+                await self._session.execute(
+                    select(WorkflowTimer)
+                    .where(WorkflowTimer.run_id == run_id)
+                    .order_by(WorkflowTimer.timer_id)
+                )
+            ).scalars()
+        )
+
+    async def list_signals(self, run_id: uuid.UUID) -> list[WorkflowSignal]:
+        return list(
+            (
+                await self._session.execute(
+                    select(WorkflowSignal)
+                    .where(WorkflowSignal.run_id == run_id)
+                    .order_by(WorkflowSignal.signal_id)
+                )
+            ).scalars()
+        )
 
 
 class IdempotencyRepository:

@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from app.sdk.context import WaitOutcome
+
 
 class FakeRecorder:
     """Collects what the context reports, in order.
@@ -15,6 +17,9 @@ class FakeRecorder:
         self.calls: list[tuple[str, str, Any]] = []
         self.keys: dict[str, str | None] = {}
         self.reconciled: list[str] = []
+        # Scripted answers for ctx.sleep / ctx.wait_for_signal, consumed in order. Empty: the wait
+        # completes at once with result None.
+        self.wait_script: list[WaitOutcome] = []
 
     async def step_started(
         self, step_name: str, input_hash: str, idempotency_key: str | None = None
@@ -54,3 +59,9 @@ class FakeRecorder:
 
     async def ensure_lease(self) -> None:
         return None
+
+    async def wait(
+        self, step_name: str, kind: str, *, signal_name: str | None, seconds: float | None
+    ) -> WaitOutcome:
+        self.calls.append(("wait", step_name, (kind, signal_name, seconds)))
+        return self.wait_script.pop(0) if self.wait_script else WaitOutcome(True, None)
