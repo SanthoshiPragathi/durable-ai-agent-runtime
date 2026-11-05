@@ -2,7 +2,7 @@
 
 A fault-tolerant execution engine for AI workflows: crash-safe, replayable, and forkable.
 
-> **Status: Phase 5 (durable timers and signals).** Workflows run, every step is recorded in PostgreSQL, a
+> **Status: Phase 6 (forking and run diff).** Workflows run, every step is recorded in PostgreSQL, a
 > crashed run resumes from its history, calls with real-world effects (payments, emails) are protected against
 > duplicates where the external system allows it, and several worker processes share the work: a dead worker's
 > runs are taken over automatically and a frozen "zombie" worker cannot write to a run it lost. Timers,
@@ -42,7 +42,7 @@ It does *not* claim universal exactly-once execution, which is impossible in gen
 | 3 | Idempotency, fake payment/email services, OUTCOME_UNKNOWN | done |
 | 4 | Multi-worker, leases, heartbeats, fencing | done |
 | 5 | Durable timers and signals | done |
-| 6 | Forking and run diff | todo |
+| 6 | Forking and run diff | done |
 | 7 | Failure injection, chaos tests, benchmarks | todo |
 | 8 | Dashboard and documentation | todo |
 
@@ -67,7 +67,7 @@ docs/             design documents
 scripts/          helper scripts
 ```
 
-## What works today (Phase 5)
+## What works today (Phase 6)
 
 ```python
 from app.sdk import workflow
@@ -106,15 +106,18 @@ async def refund(ctx, order_id: str):
   `WAITING` with no lease and no worker; a due timer or a matching signal (`POST /runs/{id}/signals/{name}`,
   deduplicated by `idempotency_key`) makes it claimable and any worker replays and continues it.
 
+- **Fork and diff:** `POST /runs/{id}/fork` starts a new run from a step of an old one (earlier steps replayed,
+  optionally with a different result for the fork step); `GET /runs/{a}/diff/{b}` shows where two runs diverge.
+
 **Guarantee, stated honestly:** at-least-once execution with duplicate protection where the external system
 supports idempotency keys (or can be asked via a verify hook). It does not claim exactly-once.
 
-**Not yet:** a run cannot be forked or diffed. Timers are only as accurate as the worker poll interval.
+**Not yet:** Timers are only as accurate as the worker poll interval.
 Idempotency keys are per run and step, so two separate runs for the same order are two operations. Fencing
 cannot recall an external call a stale worker already started. A run executed directly with
 `execute_run`/`resume_run` (not by a worker) is not recovered automatically. One run at a time per worker process.
 
-See [docs/timers-and-signals.md](docs/timers-and-signals.md) (waits, wakeups, why none is lost),
+See [docs/forking-and-diff.md](docs/forking-and-diff.md), [docs/timers-and-signals.md](docs/timers-and-signals.md) (waits, wakeups, why none is lost),
 [docs/workers-and-leases.md](docs/workers-and-leases.md) (claiming, leases, fencing, failure table),
 [docs/idempotency.md](docs/idempotency.md) (decision table, review path, what is and is not protected,
 the bug the property test found), [docs/replay-and-recovery.md](docs/replay-and-recovery.md),
@@ -128,6 +131,7 @@ python scripts/demo_duplicate_refund.py   # worker dies after the refund succeed
 python scripts/demo_multi_worker.py       # three worker processes share twelve runs, each run once
 python scripts/demo_zombie_worker.py      # a frozen worker wakes up after a takeover and is rejected
 python scripts/demo_durable_waiting.py    # a leave request waits for a manager with no process running
+python scripts/demo_forking.py            # fork a finished run with a different answer, then diff the runs
 ```
 
 The second demo kills the worker after the payment service processed the refund but before the runtime
