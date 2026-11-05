@@ -337,3 +337,41 @@ async def test_a_worker_does_not_start_a_step_after_it_lost_the_lease(
 
     assert ran == []  # step "two"'s function never ran on the zombie
     assert w1.lost_leases == 1
+
+
+async def test_a_worker_frozen_between_recording_a_step_and_running_it_does_not_run_it(
+    session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The narrow window ensure_lease() exists for: STEP_STARTED was recorded under a valid lease,
+    then the worker froze. When it thaws, the step function must not run on a run it no longer owns."""
+    from app.engine.execution_context import DbStepRecorder
+
+    ran: list[str] = []
+    froze, thaw = asyncio.Event(), asyncio.Event()
+    original = DbStepRecorder.step_started
+
+    async def freeze_after_recording(self, step_name, input_hash, idempotency_key=None):
+        await original(self, step_name, input_hash, idempotency_key)
+        if self._fence.worker_id == "w1":
+            froze.set()
+            await thaw.wait()
+
+    monkeypatch.setattr(DbStepRecorder, "step_started", freeze_after_recording)
+
+    @workflow
+    async def effectful(ctx):
+        return await ctx.step("act", lambda: ran.append("acted") or "done")
+
+    run = await runtime.create_run(session_factory, "effectful", {})
+    w1 = make_worker(session_factory, "w1", heartbeat_seconds=25.0)
+    task = asyncio.create_task(w1.run_until_idle())
+    await asyncio.wait_for(froze.wait(), timeout=5)
+
+    await _expire(session_factory, run.run_id)
+    assert await make_worker(session_factory, "w2").run_until_idle() == 1
+    assert ran == ["acted"]  # w2 ran it once
+
+    thaw.set()
+    await asyncio.wait_for(task, timeout=5)
+    assert ran == ["acted"]  # the zombie did not run it a second time
+    assert w1.lost_leases == 1
