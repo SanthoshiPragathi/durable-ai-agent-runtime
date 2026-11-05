@@ -14,7 +14,7 @@ from app.engine.errors import InvalidRunStateError, StaleLeaseError
 from app.engine.lease import Fence
 from app.sdk import workflow
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("isolated_registry")]
+pytestmark = [pytest.mark.integration, pytest.mark.concurrency, pytest.mark.usefixtures("isolated_registry")]
 
 KNOWN = [("noop", 1)]
 

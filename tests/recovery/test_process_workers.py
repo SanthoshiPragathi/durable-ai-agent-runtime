@@ -17,7 +17,7 @@ from app.engine.failpoints import CRASH_EXIT_CODE
 from app.integrations.tools import EmailService, IdempotentPaymentService
 from tests.fixtures.processes import start_worker
 
-pytestmark = [pytest.mark.integration, pytest.mark.recovery]
+pytestmark = [pytest.mark.integration, pytest.mark.recovery, pytest.mark.concurrency]
 
 LEASE = 1.5
 

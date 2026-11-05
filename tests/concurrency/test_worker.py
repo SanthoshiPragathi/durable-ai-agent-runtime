@@ -12,7 +12,7 @@ from app.engine import runtime
 from app.engine.worker import Worker
 from app.sdk import workflow
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("isolated_registry")]
+pytestmark = [pytest.mark.integration, pytest.mark.concurrency, pytest.mark.usefixtures("isolated_registry")]
 
 
 def make_worker(session_factory: SessionFactory, name: str, **kw) -> Worker:

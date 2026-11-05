@@ -94,7 +94,7 @@ or `None` if it provably did not. (A result of `None` therefore cannot mean "fou
 |---|---|
 | A retry or resume repeating a call whose tool honors the key | A tool that ignores or mishandles idempotency keys |
 | A lost reply (timeout after the effect committed) | A second, separate run for the same order (keys are per run and step; a business rule like "refund each order once" belongs in the workflow) |
-| A worker dying between the effect and recording it | Fencing tokens: they protect database writes only, not calls a stale worker makes to external APIs (Phase 4) |
+| A worker dying between the effect and recording it | Fencing tokens: they protect database writes only, not calls a stale worker makes to external APIs. Idempotency keys cover those; see [workers-and-leases.md](workers-and-leases.md) |
 | Blind retries of non-idempotent tools | A reviewer who gives a wrong answer |
 
 ## Where the tests prove it
@@ -138,4 +138,4 @@ failure from the same test was a wrong assumption in the test itself: a reviewer
 - `AmbiguousOutcomeError` must be raised by the tool wrapper; the runtime cannot infer ambiguity from arbitrary exceptions.
 - A step's result must be JSON and not `None` for `verify` to be able to signal "found".
 - Retries inside one live attempt use a fixed small backoff (`retry_delay`); there is no configurable policy yet.
-- Resuming is still triggered by a person or script; automatic recovery needs workers and leases (Phase 4).
+- Resuming a directly executed run is still triggered by a person or script; worker processes recover leased runs automatically ([workers-and-leases.md](workers-and-leases.md)).

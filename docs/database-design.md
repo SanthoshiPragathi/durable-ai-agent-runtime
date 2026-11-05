@@ -14,12 +14,18 @@ erDiagram
 | Table | Purpose |
 |---|---|
 | `workflows` | Registered definitions. Primary key `(name, version)`, so a run always points at the exact version of the code it used. |
-| `workflow_runs` | One row per execution: status, JSON input, JSON result, current step, error message, timestamps, `parent_run_id`. |
+| `workflow_runs` | One row per execution: status, JSON input, JSON result, current step, error message, timestamps, `parent_run_id`, and the lease: `lease_owner`, `lease_expires_at`, `fencing_token` (+1 on every claim). |
 | `workflow_events` | The append-only history. One row per thing that happened. |
 | `idempotency_records` | One row per external operation, keyed by idempotency key: status (`IN_FLIGHT`, `SUCCEEDED`, `RECONCILED`, `FAILED`, `UNKNOWN`), attempts and result. Updated in the same transaction as the matching event. |
 
-Still to come, each with its own migration: `worker_leases` (Phase 4), `workflow_timers` and
-`workflow_signals` (Phase 5).
+| `workers` | Informational registry of worker processes (id, host, pid, status, last heartbeat). Nothing depends on it for correctness: who may run a run is decided by the lease columns on `workflow_runs`. |
+
+The lease lives on the run row, not in a separate table, so claiming, renewing and fence-checking are each a
+single-row operation on the same row lock that event appends already use. See
+[workers-and-leases.md](workers-and-leases.md). An index on `(status, lease_expires_at, created_at)` serves the
+claim query.
+
+Still to come, each with its own migration: `workflow_timers` and `workflow_signals` (Phase 5).
 
 The fake payment and email services keep their own tables (`payment_refunds`, `emails`) in a separate
 database (`fake_services`), created with `create_all` rather than migrations. They are "the outside

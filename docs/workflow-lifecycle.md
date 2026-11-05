@@ -67,7 +67,8 @@ The full list, with the reasons, is in [replay-and-recovery.md](replay-and-recov
 
 - Protection against duplicate effects depends on the external system honoring idempotency keys (or a
   verify hook, or a human); see [idempotency.md](idempotency.md).
-- Nothing resumes crashed runs automatically, and `resume_run` is only safe when the old executor is
-  dead. Worker processes, leases and fencing are Phase 4.
-- Execution runs inside the API process, not in worker processes. (Phase 4)
+- Workers (Phase 4) recover crashed runs automatically, see [workers-and-leases.md](workers-and-leases.md).
+  A run executed directly with `execute_run`/`resume_run` is not recovered automatically, and
+  `resume_run` refuses a run that has a worker lease.
+- With `EXECUTION_MODE=inline` (the default) the API process still executes runs itself.
 - Failed steps are not retried; there are no retry limits or backoff yet.

@@ -31,7 +31,9 @@ def upgrade() -> None:
         sa.Column("pid", sa.Integer(), nullable=False),
         sa.Column("status", sa.String(10), nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("last_heartbeat_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "last_heartbeat_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("worker_id"),
         sa.CheckConstraint("status IN ('ACTIVE', 'STOPPED')", name="ck_workers_status"),
     )
