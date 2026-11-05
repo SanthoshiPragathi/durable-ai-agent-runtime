@@ -138,3 +138,32 @@ class TimerOut(BaseModel):
     status: str
     created_at: datetime
     fired_at: datetime | None = None
+
+
+class ForkRequest(BaseModel):
+    from_step: str
+    use_override: bool = Field(default=False, description="Give from_step the result in override_result")
+    override_result: Any = None
+    input_overrides: dict[str, Any] | None = None
+
+
+class StepDiffOut(BaseModel):
+    step_name: str
+    status_a: str | None
+    status_b: str | None
+    same_input: bool
+    same_result: bool
+    identical: bool
+    result_a: Any = None
+    result_b: Any = None
+
+
+class RunDiffOut(BaseModel):
+    run_a: uuid.UUID
+    run_b: uuid.UUID
+    first_divergence: str | None
+    status_a: str
+    status_b: str
+    result_a: Any = None
+    result_b: Any = None
+    steps: list[StepDiffOut]
