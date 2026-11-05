@@ -1,4 +1,4 @@
-# Workflow lifecycle (Phase 1)
+# Workflow lifecycle (Phase 1, updated through Phase 5)
 
 ## Run states
 
@@ -11,9 +11,12 @@ stateDiagram-v2
     RUNNING --> RUNNING: resume_run after a crash
     RUNNING --> NEEDS_REVIEW: a step's outcome is unknown
     NEEDS_REVIEW --> RUNNING: a person resolves the step
+    RUNNING --> WAITING: ctx.sleep / ctx.wait_for_signal not over yet
+    WAITING --> RUNNING: timer fired or signal arrived
 ```
 
-`WAITING` and `CANCELLED` arrive with timers, signals and cancellation in later phases.
+`WAITING` (Phase 5) is a run parked on a timer or a signal; see [timers-and-signals.md](timers-and-signals.md).
+`CANCELLED` arrives with cancellation in a later phase.
 
 ## What happens for one run
 
@@ -43,6 +46,7 @@ sequenceDiagram
 | Event | When |
 |---|---|
 | `WORKFLOW_STARTED` | The run moved from PENDING to RUNNING |
+| `WORKFLOW_WAITING` | The run reached a sleep / signal wait that is not over; it is now `WAITING` with no lease |
 | `STEP_OUTCOME_UNKNOWN` | A non-idempotent effect's outcome cannot be established; the run moves to `NEEDS_REVIEW` |
 | `STEP_RESOLVED` | A reviewer answered (`completed`, `failed` or `not_executed`) and who decided; for `completed` this is the step's completion record |
 | `WORKFLOW_RESUMED` | `resume_run` started replaying a crashed run; carries counts of completed, failed and in-doubt steps |

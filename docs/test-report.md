@@ -1,4 +1,4 @@
-# Test report (through Phase 4)
+# Test report (through Phase 5)
 
 Only results that were actually observed are listed here. Re-run them yourself with the commands at the end.
 
@@ -10,13 +10,13 @@ Only results that were actually observed are listed here. Re-run them yourself w
 | Python | 3.13.18 |
 | PostgreSQL | 16.15 (UTF-8) |
 | Key packages | pytest 9.2.0, Hypothesis 6.170.14, SQLAlchemy 2.1.6, asyncpg 0.32.0 |
-| Also confirmed by the author | Phases 1, 2 and 3 (64, 121 and 229 tests) pass on Windows, Python 3.12.6, PostgreSQL 16 in Docker (Phase 3: 229 passed in about 3-4 minutes there). Phase 4 on Windows: first run (275 tests) had 2 failures, both explained below and fixed; the rerun is not yet recorded here. |
+| Also confirmed by the author | Phases 1, 2 and 3 (64, 121 and 229 tests) pass on Windows, Python 3.12.6, PostgreSQL 16 in Docker (Phase 3: 229 passed in about 3-4 minutes there). Phase 4 on Windows: first run (275 tests) had 2 failures, both explained below and fixed; the rerun (277 tests) passed in about 3 min 14 s. Phase 5 on Windows: not yet recorded. |
 
 ## Results
 
 | Suite | Command | Tests | Result |
 |---|---|---|---|
-| Everything | `pytest` | 277 | **277 passed** (about 3 min 15 s) |
+| Everything | `pytest` | 306 | **306 passed** (3 min 52 s on Linux) |
 | Unit (no database) | `pytest -m "not integration"` | 91 | passed |
 | Integration (PostgreSQL) | `pytest -m integration` | 186 | passed |
 | of which crash/resume (`recovery`) | `pytest -m recovery` | 80 | passed |
@@ -27,6 +27,24 @@ Only results that were actually observed are listed here. Re-run them yourself w
 | Lint | `ruff check .` | | clean |
 
 (Markers overlap: recovery, concurrency and chaos tests are also integration tests.)
+
+## What the Phase 5 tests prove (29 new tests)
+
+| Claim | Test |
+|---|---|
+| A wait parks the run `WAITING` with no lease; a signal wakes it; a different worker finishes it; earlier steps are replayed, not re-run | `tests/integration/test_waits.py` |
+| An early signal is kept and consumed; a duplicate idempotency key stores nothing; signals are consumed oldest first, once; another signal name does not wake the run | same |
+| Unknown run is 404, finished run is 409 | same, `tests/integration/test_api_waits.py` |
+| Timeout fires and the workflow sees `timed_out`; a stored signal beats a due timeout; consuming a signal cancels the timer | same |
+| A spurious wake re-parks with the same timer row and the same deadline; no second `STEP_STARTED` | same |
+| 12 concurrent firers fire 8 timers exactly 8 times | `tests/concurrency/test_waits_concurrency.py` |
+| A signal racing the run's suspension (30 rounds, varying offsets) is never lost and consumed once | same |
+| Worker process killed before / after the wait is recorded, or right after consuming the signal: one ledger line per step, valid history | `tests/recovery/test_process_waits.py` |
+| ctx semantics with a fake recorder (replay, non-determinism, halt after suspend) | `tests/unit/test_waits_context.py` |
+
+Mutation checks (a deliberate bug is introduced, the Phase 5 tests must fail; all five were caught):
+signal dedupe removed; consumption not recorded; wake ignores `waiting_signal`; the pre-park signal check
+skipped; timeout checked before a stored signal.
 
 ## What the Phase 4 tests prove
 
@@ -71,9 +89,8 @@ The "world" column is read from the fake services' own ledger, a separate databa
 | 16 | Same, with a verify hook | same | verify finds the refund, step `RECONCILED` | 1 → 1 | **Prevented** by reconciliation |
 | 17 | Plain `ctx.step` around a payment (the wrong way) | `STEP_STARTED` | step runs again | 1 → **2** | **Yes**: shown on purpose; use `ctx.effect` |
 
-Not yet tested (later phases): crash during heartbeat renewal, stale worker after lease expiry, two workers
-PostgreSQL unavailable or restarted, duplicate signals, duplicate timers. These need timers, signals and the
-Phase 7 chaos harness. (Claiming a run twice and stale workers are now covered; see above.)
+Not yet tested (Phase 7): PostgreSQL unavailable or restarted mid-run. Claiming a run twice, stale workers,
+duplicate signals and duplicate timers are covered above.
 
 ## A bug the tests found
 

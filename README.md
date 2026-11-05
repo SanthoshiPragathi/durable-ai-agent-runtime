@@ -2,7 +2,7 @@
 
 A fault-tolerant execution engine for AI workflows: crash-safe, replayable, and forkable.
 
-> **Status: Phase 4 (workers, leases, fencing).** Workflows run, every step is recorded in PostgreSQL, a
+> **Status: Phase 5 (durable timers and signals).** Workflows run, every step is recorded in PostgreSQL, a
 > crashed run resumes from its history, calls with real-world effects (payments, emails) are protected against
 > duplicates where the external system allows it, and several worker processes share the work: a dead worker's
 > runs are taken over automatically and a frozen "zombie" worker cannot write to a run it lost. Timers,
@@ -40,8 +40,8 @@ It does *not* claim universal exactly-once execution, which is impossible in gen
 | 1 | Workflow SDK, schema, event persistence, basic API | done |
 | 2 | Deterministic replay, recorded time/random/LLM | done |
 | 3 | Idempotency, fake payment/email services, OUTCOME_UNKNOWN | done |
-| 4 | Multi-worker, leases, heartbeats, fencing | todo |
-| 5 | Durable timers and signals | todo |
+| 4 | Multi-worker, leases, heartbeats, fencing | done |
+| 5 | Durable timers and signals | done |
 | 6 | Forking and run diff | todo |
 | 7 | Failure injection, chaos tests, benchmarks | todo |
 | 8 | Dashboard and documentation | todo |
@@ -67,7 +67,7 @@ docs/             design documents
 scripts/          helper scripts
 ```
 
-## What works today (Phase 4)
+## What works today (Phase 5)
 
 ```python
 from app.sdk import workflow
@@ -102,15 +102,20 @@ async def refund(ctx, order_id: str):
   expires and another worker resumes the run from the history. If a worker is merely frozen and wakes up
   later, the database rejects its writes (`StaleLeaseError`) and it stands down.
 
+- **`ctx.sleep(name, seconds)`** and **`ctx.wait_for_signal(name, signal=..., timeout=...)`** park the run as
+  `WAITING` with no lease and no worker; a due timer or a matching signal (`POST /runs/{id}/signals/{name}`,
+  deduplicated by `idempotency_key`) makes it claimable and any worker replays and continues it.
+
 **Guarantee, stated honestly:** at-least-once execution with duplicate protection where the external system
 supports idempotency keys (or can be asked via a verify hook). It does not claim exactly-once.
 
-**Not yet:** a run cannot wait for a timer or a signal (`ctx.sleep`, `ctx.wait_for_signal`) and cannot be forked.
+**Not yet:** a run cannot be forked or diffed. Timers are only as accurate as the worker poll interval.
 Idempotency keys are per run and step, so two separate runs for the same order are two operations. Fencing
 cannot recall an external call a stale worker already started. A run executed directly with
 `execute_run`/`resume_run` (not by a worker) is not recovered automatically. One run at a time per worker process.
 
-See [docs/workers-and-leases.md](docs/workers-and-leases.md) (claiming, leases, fencing, failure table),
+See [docs/timers-and-signals.md](docs/timers-and-signals.md) (waits, wakeups, why none is lost),
+[docs/workers-and-leases.md](docs/workers-and-leases.md) (claiming, leases, fencing, failure table),
 [docs/idempotency.md](docs/idempotency.md) (decision table, review path, what is and is not protected,
 the bug the property test found), [docs/replay-and-recovery.md](docs/replay-and-recovery.md),
 [docs/database-design.md](docs/database-design.md) and [docs/workflow-lifecycle.md](docs/workflow-lifecycle.md).
@@ -122,6 +127,7 @@ python scripts/demo_crash_recovery.py     # kill a worker mid-run, resume in a n
 python scripts/demo_duplicate_refund.py   # worker dies after the refund succeeded: still ONE refund
 python scripts/demo_multi_worker.py       # three worker processes share twelve runs, each run once
 python scripts/demo_zombie_worker.py      # a frozen worker wakes up after a takeover and is rejected
+python scripts/demo_durable_waiting.py    # a leave request waits for a manager with no process running
 ```
 
 The second demo kills the worker after the payment service processed the refund but before the runtime
@@ -129,6 +135,8 @@ recorded it, resumes in a new process, and shows the payment service's own ledge
 `refund_id` before and after. The fourth freezes a worker for 8 seconds right after its refund succeeded; a
 second worker takes the run over once the lease lapses (fencing token 2) and finishes it; when the first
 worker thaws, its write is rejected, the history is unchanged and the ledger still shows one refund.
+The fifth parks a leave request as `WAITING` (the worker process exits), delivers a signal twice with the same
+idempotency key, lets a new worker finish the run, then shows a second request whose timeout fires.
 
 ## Getting started
 
