@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 import app.examples.refund_workflow  # noqa: F401  (importing registers the example workflows)
 import app.examples.simple_workflow  # noqa: F401
+import app.examples.slow_workflow  # noqa: F401
 from app.api.routes import runs, services, workers, workflows
 from app.engine.errors import (
     DurableRuntimeError,
