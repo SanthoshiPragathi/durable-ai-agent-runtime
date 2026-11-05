@@ -51,3 +51,6 @@ class FakeRecorder:
 
     async def effect_attempt(self, step_name: str, idempotency_key: str) -> None:
         self.calls.append(("retry", step_name, idempotency_key))
+
+    async def ensure_lease(self) -> None:
+        return None

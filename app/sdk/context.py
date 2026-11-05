@@ -30,6 +30,7 @@ from app.engine.errors import (
     LLMConfigurationError,
     NonDeterminismError,
     OutcomeUnknownError,
+    StaleLeaseError,
     StepFailedError,
 )
 from app.engine.hashing import hash_step_input, normalize_json
@@ -65,6 +66,8 @@ class StepRecorder(Protocol):
     ) -> None: ...
 
     async def effect_attempt(self, step_name: str, idempotency_key: str) -> None: ...
+
+    async def ensure_lease(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -111,9 +114,10 @@ class WorkflowContext:
 
     @property
     def halt(self) -> DurableRuntimeError | None:
-        """Set once the run must stop: replay diverged (NonDeterminismError) or a step's outcome
-        is unknown (OutcomeUnknownError). Every later ctx call re-raises it, so workflow code that
-        swallows the exception cannot carry on and do real work from a state it cannot trust."""
+        """Set once the run must stop: replay diverged (NonDeterminismError), a step's outcome is
+        unknown (OutcomeUnknownError) or the worker lost its lease (StaleLeaseError). Every later
+        ctx call re-raises it, so workflow code that swallows the exception cannot carry on and do
+        real work from a state it cannot trust."""
         return self._halt
 
     @property
@@ -252,6 +256,20 @@ class WorkflowContext:
         call: Callable[[], Any],
         effect: EffectSpec | None = None,
     ) -> Any:
+        try:
+            return await self._execute_step(name, input_hash, call, effect)
+        except StaleLeaseError as exc:
+            # This worker no longer owns the run. Nothing more may happen on its behalf.
+            self._halt = exc
+            raise
+
+    async def _execute_step(
+        self,
+        name: str,
+        input_hash: str,
+        call: Callable[[], Any],
+        effect: EffectSpec | None = None,
+    ) -> Any:
         if self._halt is not None:
             raise self._halt
         if name in self._used_step_names:
@@ -293,6 +311,7 @@ class WorkflowContext:
         key = effect.key if effect else None
         attempt = 1
         while True:
+            await self._recorder.ensure_lease()  # a stale worker must not act (raises StaleLeaseError)
             try:
                 result = call()
                 if inspect.isawaitable(result):
