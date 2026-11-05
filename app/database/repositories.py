@@ -173,6 +173,19 @@ class RunRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def released_by(self, run_id: uuid.UUID, fence: Fence) -> bool:
+        """True if the run's lease was released by the holder of `fence` itself: the run finished or
+        was parked in NEEDS_REVIEW under the same token and nobody has claimed it since. This is how
+        a worker tells "I am done" apart from "someone took my run" when a renewal is refused."""
+        row = (
+            await self._session.execute(
+                select(WorkflowRun.fencing_token, WorkflowRun.lease_owner).where(
+                    WorkflowRun.run_id == run_id
+                )
+            )
+        ).first()
+        return row is not None and row[0] == fence.token and row[1] is None
+
     async def check_fence(self, run_id: uuid.UUID, fence: Fence) -> None:
         """Raise StaleLeaseError unless `fence` is still the run's current lease holder.
 

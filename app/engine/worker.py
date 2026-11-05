@@ -191,25 +191,34 @@ class Worker:
             return history
 
     async def _keep_lease(self, run_id: uuid.UUID, fence: Fence, drive: asyncio.Task) -> bool:
-        """Renew the lease until the run ends. Cancels `drive` and returns False if the lease is lost.
+        """Renew the lease until the run ends. Cancels `drive` and returns False if the lease is lost;
+        returns True if the run ended by itself (it finished or was parked, releasing its own lease).
 
-        Two ways to lose it: the database says we no longer hold the run, or we could not reach the
+        Two ways to lose it: the database says someone else holds the run, or we could not reach the
         database for a whole lease period (then another worker may already have the run, so we stop
         acting on it rather than guess).
+
+        A refused renewal is NOT automatically a loss: when the run completes, the completion
+        transaction clears the lease, and a heartbeat that fires just after would be refused. That is
+        checked before cancelling, otherwise a finished run would be reported as a lost lease.
         """
         last_confirmed = time.monotonic()
         while True:
             await asyncio.sleep(self.heartbeat_seconds)
             try:
                 async with self.session_factory() as session, session.begin():
-                    held = await RunRepository(session).renew_lease(run_id, fence, self.lease_seconds)
+                    runs = RunRepository(session)
+                    held = await runs.renew_lease(run_id, fence, self.lease_seconds)
                     await WorkerRepository(session).touch(self.worker_id)
+                    released = not held and await runs.released_by(run_id, fence)
             except Exception:
                 logger.warning("lease renewal failed", extra={"run_id": str(run_id)}, exc_info=True)
                 if time.monotonic() - last_confirmed >= self.lease_seconds:
                     drive.cancel()
                     return False
                 continue
+            if released:
+                return True  # our own completion released the lease; nothing was lost
             if not held:
                 drive.cancel()
                 return False
