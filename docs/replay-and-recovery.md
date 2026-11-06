@@ -121,3 +121,18 @@ pytest -m recovery                               # all crash/resume tests
 python -m app.engine.runner resume <run_id>      # resume one run by hand
 python -m app.engine.worker --drain              # or let a worker recover it (waits for the lease)
 ```
+
+## Rule for workflow authors: step and effect arguments must replay identically
+
+On replay the engine hashes each step's arguments and compares the hash with the recorded one; a difference stops
+the run with `NonDeterminismError` (it cannot know whether the workflow or the world changed). So the arguments of
+`ctx.step`, `ctx.effect` and `ctx.llm` must be the same values on every execution of the workflow, in any process.
+
+Do not pass shared mutable objects that the step itself changes (a module-level list the step appends to, a client
+holding counters). This was a real bug in the leave-approval example: it passed its `OUTBOX` list to the email
+effect, the effect appended to it, and a process that parked the run and later resumed it hashed the call
+differently the second time (the demo's usual path hides it because every worker there is a fresh process). Read such
+state from inside the step function instead. Regression test: `tests/integration/test_leave_approval.py`.
+
+Changing a workflow's step names or arguments also changes what its already-recorded runs expect: bump the workflow
+version (`registry` is keyed by name and version) for runs that are in flight, or let them finish first.
