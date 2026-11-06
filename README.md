@@ -199,7 +199,7 @@ pytest tests/concurrency       # claiming, leases, fencing, zombie workers
 ```
 
 Integration tests use the database in `TEST_DATABASE_URL` (default
-`postgresql+asyncpg://durable:durable@localhost:5432/durable_test`). It is created if missing and its
+`postgresql+asyncpg://durable:durable@127.0.0.1:5432/durable_test`). It is created if missing and its
 schema is **dropped and rebuilt** at the start of each test session, so the name must end in `_test`.
 The fake services use `TEST_SERVICES_DATABASE_URL` (default `.../durable_services_test`) the same way.
 If PostgreSQL is unreachable the integration tests are reported as skipped, not passed.

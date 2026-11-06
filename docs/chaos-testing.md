@@ -47,7 +47,7 @@ infrastructure error and retries on its next poll) instead of blocking forever. 
 connect timeout instead of hanging, the database really is not answering; check, in order:
 
 1. `docker compose ps` shows `postgres` healthy, and `docker compose logs postgres --tail 50` has no crash loop.
-2. Try `127.0.0.1` instead of `localhost` (`TEST_DATABASE_URL=postgresql+asyncpg://durable:durable@127.0.0.1:5432/durable_test`
+2. Use `127.0.0.1` instead of `localhost` (now the default everywhere; an old `.env` may still say `localhost`) (`TEST_DATABASE_URL=postgresql+asyncpg://durable:durable@127.0.0.1:5432/durable_test`
    and `TEST_SERVICES_DATABASE_URL=...@127.0.0.1:5432/durable_services_test`). On Windows `localhost` can resolve to `::1`
    first, and Docker Desktop publishes the port on `127.0.0.1` only.
 3. Measure the route: `python scripts/db_latency.py` prints connect time, query time and what a lease renewal costs
@@ -75,3 +75,10 @@ What the test does now (assertions unchanged):
 
 Measured on a 2-core Linux sandbox, one seed, 0.15 s added per packet (the original test: `TimeoutError` at 300 s,
 367 s total, 51 lease-lost warnings; the current one: passed in 196 s).
+
+### Measured on the author's Windows machine
+
+`python scripts/db_latency.py`: connecting through `127.0.0.1` took 15.5 ms, through `localhost` 2,062 ms. Windows tries
+the IPv6 address (`::1`) first, nothing listens there because Docker Desktop publishes the port on IPv4 only, and every
+new connection waits about 2 s before falling back. The defaults (`app/config.py`, `tests/conftest.py`, `.env.example`)
+therefore use `127.0.0.1`. If your `.env` still contains `@localhost:5432`, change it.

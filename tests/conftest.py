@@ -30,7 +30,7 @@ from app.integrations.tools.fake_ledger import ServicesBase
 from app.sdk.workflow import registry
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TEST_URL = "postgresql+asyncpg://durable:durable@localhost:5432/durable_test"
+DEFAULT_TEST_URL = "postgresql+asyncpg://durable:durable@127.0.0.1:5432/durable_test"
 
 
 @pytest.fixture(scope="session")
@@ -109,7 +109,7 @@ def isolated_registry() -> Iterator[None]:
     registry.restore(saved)
 
 
-DEFAULT_SERVICES_TEST_URL = "postgresql+asyncpg://durable:durable@localhost:5432/durable_services_test"
+DEFAULT_SERVICES_TEST_URL = "postgresql+asyncpg://durable:durable@127.0.0.1:5432/durable_services_test"
 
 
 @pytest.fixture(scope="session")

@@ -13,9 +13,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "postgresql+asyncpg://durable:durable@localhost:5432/durable"
+    database_url: str = "postgresql+asyncpg://durable:durable@127.0.0.1:5432/durable"
     services_database_url: str = (
-        "postgresql+asyncpg://durable:durable@localhost:5432/fake_services"
+        "postgresql+asyncpg://durable:durable@127.0.0.1:5432/fake_services"
     )
 
     # Upper bounds on talking to PostgreSQL, so a database that accepts the TCP connection but never
