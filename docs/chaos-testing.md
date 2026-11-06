@@ -50,5 +50,28 @@ connect timeout instead of hanging, the database really is not answering; check,
 2. Try `127.0.0.1` instead of `localhost` (`TEST_DATABASE_URL=postgresql+asyncpg://durable:durable@127.0.0.1:5432/durable_test`
    and `TEST_SERVICES_DATABASE_URL=...@127.0.0.1:5432/durable_services_test`). On Windows `localhost` can resolve to `::1`
    first, and Docker Desktop publishes the port on `127.0.0.1` only.
-3. The chaos tests open many short-lived connections (about 100 per second in `test_db_outage.py`, because the test
-   engines use `NullPool`). A slow Docker Desktop port proxy may stall under that rate.
+3. Measure the route: `python scripts/db_latency.py` prints connect time, query time and what a lease renewal costs
+   for `127.0.0.1` and `localhost`. On a Linux host expect a few milliseconds.
+
+### "TimeoutError" after ~10 minutes with lots of "lease lost" warnings
+
+Seen on Windows with Docker Desktop, and reproduced on Linux by putting a latency proxy in front of PostgreSQL
+(`tests/fixtures/latency_proxy.py`). The cause was the test setup, not the runtime: the shared test engines use
+`NullPool`, so every operation opened a new connection (about 3,000 in one run of `test_db_outage.py`). Behind a slow
+route each connection costs hundreds of milliseconds, a lease renewal then takes about as long as the 0.8 s lease
+itself, and the fault schedule produces many times more takeovers, each of them a replay over the same slow link.
+The drain never fits in the 300 s limit.
+
+What the test does now (assertions unchanged):
+
+* uses the production engine configuration (pooled, pre-ping, bounded connects) and asserts it opens at most a few
+  dozen connections;
+* measures the round trip of a renewal-shaped transaction and scales lease, heartbeat, poll interval and drain limit
+  to it (`tests/fixtures/slow_link.py`; on a fast link the values stay 0.8 s / 0.1 s / 0.02 s / 300 s);
+* on a timeout, fails with what it saw (run states, fencing tokens, per-worker error counts) rather than a bare
+  `TimeoutError`;
+* has a second case, `slow-link`, that runs one schedule behind the latency proxy. `CHAOS_SLOW_LINK_DELAY` (seconds
+  added to every packet, default 0.05) makes it harsher.
+
+Measured on a 2-core Linux sandbox, one seed, 0.15 s added per packet (the original test: `TimeoutError` at 300 s,
+367 s total, 51 lease-lost warnings; the current one: passed in 196 s).
